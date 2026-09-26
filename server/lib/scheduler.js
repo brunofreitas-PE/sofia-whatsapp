@@ -5,6 +5,26 @@ const { sendText } = require("./whatsapp");
 const { generateSuggestion } = require("./claude");
 const { load, save } = require("./store");
 
+// Lógica da sugestão do dia, isolada numa função própria pra poder ser chamada
+// tanto pelo cron das 8h quanto por uma rota de teste manual (ver server/index.js).
+async function runDailySuggestionNow() {
+  const owner = process.env.OWNER_WHATSAPP_NUMBER;
+  const state = load();
+  const today = new Date().toISOString().slice(0, 10);
+  const calendarItem =
+    state.calendar.find((i) => i.date === today) || {
+      date: today,
+      pillar: "educativo",
+      format: "post simples",
+      title: "(sem item no calendário — gerar algo genérico)",
+    };
+  const suggestion = await generateSuggestion({ calendarItem });
+  await sendText(owner, suggestion);
+  state.pendingSuggestion = { date: today, text: suggestion, status: "aguardando" };
+  save(state);
+  return suggestion;
+}
+
 function start() {
   const owner = process.env.OWNER_WHATSAPP_NUMBER;
   if (!owner) {
@@ -17,19 +37,7 @@ function start() {
   // 08:00 — sugestão do dia
   cron.schedule("0 8 * * *", async () => {
     try {
-      const state = load();
-      const today = new Date().toISOString().slice(0, 10);
-      const calendarItem =
-        state.calendar.find((i) => i.date === today) || {
-          date: today,
-          pillar: "educativo",
-          format: "post simples",
-          title: "(sem item no calendário — gerar algo genérico)",
-        };
-      const suggestion = await generateSuggestion({ calendarItem });
-      await sendText(owner, suggestion);
-      state.pendingSuggestion = { date: today, text: suggestion, status: "aguardando" };
-      save(state);
+      await runDailySuggestionNow();
     } catch (err) {
       console.error("[scheduler] falha ao enviar sugestão do dia:", err.message);
     }
@@ -51,4 +59,4 @@ function start() {
   console.log("[scheduler] agendador iniciado.");
 }
 
-module.exports = { start };
+module.exports = { start, runDailySuggestionNow };
