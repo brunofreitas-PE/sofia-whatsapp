@@ -23,7 +23,12 @@ app.get("/debug/gerar-sugestao", async (req, res) => {
     res.type("text/plain").send("Sugestão gerada e enviada! Confira seu WhatsApp.\n\n" + suggestion);
   } catch (err) {
     console.error("[debug] falha ao gerar sugestão:", err);
-    res.status(500).send("Erro: " + err.message);
+    // err.response?.data traz o detalhe de verdade quando o erro vem de uma API
+    // externa (Meta ou Anthropic) — err.message sozinho só diz o código HTTP.
+    const detalhe = err.response?.data
+      ? JSON.stringify(err.response.data, null, 2)
+      : err.message;
+    res.status(500).type("text/plain").send("Erro: " + detalhe);
   }
 });
 
