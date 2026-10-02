@@ -43,7 +43,15 @@ async function runDailySuggestionNow() {
     };
   const suggestion = await generateSuggestion({ calendarItem });
   await sendText(owner, suggestion);
-  state.pendingSuggestion = { date: today, text: suggestion, status: "aguardando" };
+  // Guardamos format + calendarItem junto, não só o texto — são usados depois pra
+  // saber se precisa gerar imagem quando o Bruno aprovar (ver server/routes/webhook.js).
+  state.pendingSuggestion = {
+    date: today,
+    text: suggestion,
+    status: "aguardando",
+    format: calendarItem.format,
+    calendarItem,
+  };
   save(state);
   return suggestion;
 }
