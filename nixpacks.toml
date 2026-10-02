@@ -1,0 +1,4 @@
+# Instala fontes no ambiente do Railway — sem isso, o sharp/librsvg não consegue
+# desenhar nenhum texto nas imagens dos posts (letras viram quadradinhos vazios).
+[phases.setup]
+aptPkgs = ["fontconfig", "fonts-dejavu-core", "fonts-liberation"]
