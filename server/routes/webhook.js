@@ -1,9 +1,33 @@
 const express = require("express");
 const router = express.Router();
-const { sendText } = require("../lib/whatsapp");
-const { interpretFeedback } = require("../lib/claude");
+const { sendText, uploadMedia, sendImageByMediaId } = require("../lib/whatsapp");
+const { interpretFeedback, classifyDecision, generateImageSpec } = require("../lib/claude");
 const { transcribeAudio } = require("../lib/transcribe");
 const { load, save } = require("../lib/store");
+const { renderSlides } = require("../lib/render");
+
+// Formatos que precisam de imagem pronta depois da aprovação (reel/story ficam só
+// no roteiro + textos de tela, porque o Bruno grava com o próprio celular).
+function precisaDeImagem(format) {
+  const f = (format || "").toLowerCase();
+  return f.includes("post simples") || f.includes("carross");
+}
+
+// Gera as imagens da sugestão aprovada e manda pelo WhatsApp, uma por uma.
+async function gerarEEnviarImagens({ to, pendingSuggestion }) {
+  await sendText(to, "Show! Gerando as imagens do post, só um instante... 🎨");
+  const spec = await generateImageSpec({
+    calendarItem: pendingSuggestion.calendarItem,
+    suggestionText: pendingSuggestion.text,
+  });
+  const pngBuffers = await renderSlides(spec.slides);
+  for (let i = 0; i < pngBuffers.length; i++) {
+    const mediaId = await uploadMedia(pngBuffers[i]);
+    const isUltima = i === pngBuffers.length - 1;
+    const caption = isUltima ? "Imagem(ns) pronta(s) pra postar! 📲" : undefined;
+    await sendImageByMediaId(to, mediaId, caption);
+  }
+}
 
 // A Meta chama essa rota UMA VEZ, na hora que você cadastra o webhook no painel,
 // só pra confirmar que o servidor é seu.
@@ -54,7 +78,33 @@ router.post("/", async (req, res) => {
     });
     await sendText(from, reply);
 
-    state.history.push({ from, text, reply, at: new Date().toISOString() });
+    const decision = await classifyDecision({
+      suggestion: state.pendingSuggestion.text,
+      feedbackText: text,
+    });
+
+    state.history.push({ from, text, reply, decision, at: new Date().toISOString() });
+
+    if (decision === "aprovado") {
+      state.pendingSuggestion.status = "aprovado";
+      save(state); // salva a aprovação já, antes de tentar gerar imagem (que pode falhar)
+
+      if (precisaDeImagem(state.pendingSuggestion.format)) {
+        try {
+          await gerarEEnviarImagens({ to: from, pendingSuggestion: state.pendingSuggestion });
+        } catch (err) {
+          console.error("[webhook] falha ao gerar/enviar imagens:", err.response?.data || err.message);
+          await sendText(
+            from,
+            "Consegui registrar a aprovação, mas tive um problema gerando as imagens agora. Vou deixar anotado o erro — pode tentar de novo em alguns minutos, ou me avisa se continuar falhando."
+          );
+        }
+      }
+      return;
+    } else if (decision === "rejeitado") {
+      state.pendingSuggestion.status = "rejeitado";
+    }
+
     save(state);
   } catch (err) {
     console.error("[webhook] erro processando mensagem:", err);
