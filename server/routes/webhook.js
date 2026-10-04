@@ -1,7 +1,12 @@
 const express = require("express");
 const router = express.Router();
 const { sendText, uploadMedia, sendImageByMediaId } = require("../lib/whatsapp");
-const { interpretFeedback, classifyDecision, generateImageSpec } = require("../lib/claude");
+const {
+  interpretFeedback,
+  classifyDecision,
+  generateImageSpec,
+  classificarConfirmacaoPublicacao,
+} = require("../lib/claude");
 const { transcribeAudio } = require("../lib/transcribe");
 const { load, save } = require("../lib/store");
 const { renderSlides } = require("../lib/render");
@@ -106,6 +111,25 @@ router.post("/", async (req, res) => {
       return;
     }
 
+    // Se o post já foi aprovado antes, a mensagem pode ser só o Bruno avisando que
+    // já publicou (ex: "postei") — isso não é feedback sobre o CONTEÚDO da
+    // sugestão, então não faz sentido passar pelo interpretFeedback/classifyDecision
+    // normal (que ia tentar reinterpretar isso como ajuste/aprovação do texto). Só
+    // atualiza o status e para por aqui; os lembretes das 13h/18h (scheduler.js)
+    // checam esse status pra saber se ainda precisam avisar.
+    if (
+      state.pendingSuggestion.status === "aprovado" ||
+      state.pendingSuggestion.status === "publicado"
+    ) {
+      const jaPublicou = await classificarConfirmacaoPublicacao(text);
+      if (jaPublicou) {
+        state.pendingSuggestion.status = "publicado";
+        save(state);
+        await sendText(from, "Show, marcado como publicado! ✅");
+        return;
+      }
+    }
+
     const reply = await interpretFeedback({
       suggestion: state.pendingSuggestion.text,
       feedbackText: text,
@@ -119,9 +143,17 @@ router.post("/", async (req, res) => {
 
     state.history.push({ from, text, reply, decision, at: new Date().toISOString() });
 
+    // Lembra o pedido de imagem elaborada assim que detectado, mesmo ANTES da
+    // aprovação final — o Bruno às vezes pede isso numa mensagem ("capricha na
+    // imagem") e só confirma numa próxima ("sim"), e essa segunda mensagem sozinha
+    // não menciona imagem nenhuma. Sem isso, o classifyDecision da mensagem de
+    // confirmação não teria como saber do pedido anterior e o sinal se perderia.
+    if (imagemElaborada) {
+      state.pendingSuggestion.imagemElaborada = true;
+    }
+
     if (decision === "aprovado") {
       state.pendingSuggestion.status = "aprovado";
-      state.pendingSuggestion.imagemElaborada = imagemElaborada;
       save(state); // salva a aprovação já, antes de tentar gerar imagem (que pode falhar)
 
       if (precisaDeImagem(state.pendingSuggestion.format)) {
