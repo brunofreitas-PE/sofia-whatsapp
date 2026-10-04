@@ -19,42 +19,35 @@ function precisaDeImagem(format) {
   return f.includes("post simples") || f.includes("carross");
 }
 
-// Gera as imagens da sugestão aprovada e manda pelo WhatsApp, uma por uma.
-// Se o Bruno pediu imagem mais elaborada (pendingSuggestion.imagemElaborada, vindo
-// do classifyDecision), tenta gerar uma imagem por IA pra cada slide via OpenAI
-// (server/lib/imagegen.js); se a chave não estiver configurada ou alguma geração
-// falhar, cai de volta pro fluxo padrão (foto de banco/ícone) sem travar o post.
+// Gera as imagens da sugestão aprovada e manda pelo WhatsApp, uma por uma. Toda
+// imagem (capa do post simples, ou cada slide do carrossel) é gerada por IA via
+// OpenAI (server/lib/imagegen.js) — é o padrão agora, não precisa pedir. Se a chave
+// não estiver configurada, ou a geração de algum slide falhar, esse slide cai de
+// volta pro fluxo padrão (foto de banco/ícone) em vez de travar o post inteiro.
 async function gerarEEnviarImagens({ to, pendingSuggestion }) {
   await sendText(to, "Show! Gerando as imagens do post, só um instante... 🎨");
-  const imagemElaborada = !!pendingSuggestion.imagemElaborada;
   const spec = await generateImageSpec({
     calendarItem: pendingSuggestion.calendarItem,
     suggestionText: pendingSuggestion.text,
-    imagemElaborada,
   });
   const especialidade =
     pendingSuggestion.calendarItem?.especialidade || pendingSuggestion.calendarItem?.title;
 
   let imagensIA = null;
-  if (imagemElaborada) {
-    if (!process.env.OPENAI_API_KEY) {
-      await sendText(
-        to,
-        "Você pediu uma imagem mais elaborada, mas a geração por IA ainda não tá configurada aqui no servidor (falta a chave da OpenAI). Vou seguir com a foto padrão por enquanto."
-      );
-    } else {
-      imagensIA = [];
-      for (const slide of spec.slides) {
-        if (!slide.imagePrompt) {
-          imagensIA.push(null);
-          continue;
-        }
-        try {
-          imagensIA.push(await gerarImagemIA(slide.imagePrompt));
-        } catch (err) {
-          console.error("[webhook] falha ao gerar imagem por IA de um slide:", err.message);
-          imagensIA.push(null); // esse slide cai pro padrão (foto de banco/texto), não trava o post inteiro
-        }
+  if (!process.env.OPENAI_API_KEY) {
+    console.error("[webhook] OPENAI_API_KEY não configurada — usando foto de banco/ícone no lugar da IA.");
+  } else {
+    imagensIA = [];
+    for (const slide of spec.slides) {
+      if (!slide.imagePrompt) {
+        imagensIA.push(null);
+        continue;
+      }
+      try {
+        imagensIA.push(await gerarImagemIA(slide.imagePrompt));
+      } catch (err) {
+        console.error("[webhook] falha ao gerar imagem por IA de um slide:", err.message);
+        imagensIA.push(null); // esse slide cai pro padrão (foto de banco/texto), não trava o post inteiro
       }
     }
   }
@@ -136,21 +129,12 @@ router.post("/", async (req, res) => {
     });
     await sendText(from, reply);
 
-    const { decision, imagemElaborada } = await classifyDecision({
+    const decision = await classifyDecision({
       suggestion: state.pendingSuggestion.text,
       feedbackText: text,
     });
 
     state.history.push({ from, text, reply, decision, at: new Date().toISOString() });
-
-    // Lembra o pedido de imagem elaborada assim que detectado, mesmo ANTES da
-    // aprovação final — o Bruno às vezes pede isso numa mensagem ("capricha na
-    // imagem") e só confirma numa próxima ("sim"), e essa segunda mensagem sozinha
-    // não menciona imagem nenhuma. Sem isso, o classifyDecision da mensagem de
-    // confirmação não teria como saber do pedido anterior e o sinal se perderia.
-    if (imagemElaborada) {
-      state.pendingSuggestion.imagemElaborada = true;
-    }
 
     if (decision === "aprovado") {
       state.pendingSuggestion.status = "aprovado";
