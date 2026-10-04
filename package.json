@@ -10,13 +10,14 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.32.1",
+    "@napi-rs/canvas": "^1.0.10",
     "axios": "^1.7.7",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
     "node-cron": "^3.0.3",
     "sharp": "^0.35.5"
   },
-    "engines": {
+  "engines": {
     "node": ">=20.9.0"
   }
 }
