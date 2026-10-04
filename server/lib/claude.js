@@ -26,8 +26,16 @@ Nunca sugira posts sobre saúde bucal genérica, outros procedimentos odontológ
 dessa lista — mesmo em conteúdo educativo/bastidores, amarre o tema a uma dessas especialidades.
 
 Sua função: sugerir o post do dia (story, reel, post simples ou carrossel), entregando o pacote completo —
-para imagem: a legenda + descrição do que cada imagem deve conter; para reel/story: roteiro, cenas, textos
-de tela, sugestão de trilha, legenda e hashtags. Nunca deixe trabalho de redator pra fazer depois.
+legenda, hashtags, e pra reel/story: roteiro, cenas, textos de tela, sugestão de trilha. Nunca deixe
+trabalho de redator pra fazer depois.
+
+IMPORTANTE SOBRE IMAGEM: pra post simples e carrossel, você NÃO precisa descrever a imagem pra um designer
+nem sugerir ferramentas externas (Canva, Photoshop, banco de imagens, Midjourney, DALL-E etc.) — isso já é
+automático. Assim que o Bruno aprovar, o sistema gera e manda a imagem pronta sozinho (usa uma foto real
+fixa da especialidade por padrão; se ele pedir algo "mais elaborado"/"capricha"/"gerado por IA", o sistema
+troca pra uma imagem gerada por IA). Nunca diga que não consegue gerar imagem, nem que isso é trabalho de
+designer/banco de imagens — se ele perguntar sobre a imagem, só confirme que ela vem pronta em seguida.
+Reel e story continuam sem imagem gerada (ele grava com o celular), então aí sim role e textos de tela bastam.
 
 Responda sempre em português do Brasil.`;
 
@@ -145,4 +153,38 @@ Regras:
   return parsed;
 }
 
-module.exports = { generateSuggestion, interpretFeedback, classifyDecision, generateImageSpec };
+// Depois que um post já foi aprovado (e a imagem, se tinha, já foi gerada e
+// mandada), o Bruno pode avisar depois que já publicou nas redes (ex: "postei",
+// "já publiquei", "saiu"). Isso é usado pra marcar status="publicado" e desligar os
+// lembretes das 13h/18h (ver scheduler.js) — sem isso, o lembrete dispara mesmo nos
+// dias em que ele já publicou, porque nada avisava o sistema disso antes.
+async function classificarConfirmacaoPublicacao(feedbackText) {
+  const api = client();
+  const msg = await api.messages.create({
+    model: "claude-sonnet-4-5",
+    max_tokens: 100,
+    messages: [
+      {
+        role: "user",
+        content: `O Bruno já tinha aprovado um post antes. Agora ele mandou esta mensagem:\n"${feedbackText}"\n\nEle está avisando que já publicou/postou esse conteúdo nas redes sociais (Instagram, etc.)? Responda APENAS com um JSON, sem texto antes ou depois, neste formato exato: {"publicado":true} ou {"publicado":false}.`,
+      },
+    ],
+  });
+  const raw = msg.content[0].text.trim();
+  const cleaned = raw.replace(/^```(json)?/i, "").replace(/```$/, "").trim();
+  try {
+    const parsed = JSON.parse(cleaned);
+    return parsed.publicado === true;
+  } catch (err) {
+    console.error("[claude] classificarConfirmacaoPublicacao: resposta não era o JSON esperado:", raw);
+    return false;
+  }
+}
+
+module.exports = {
+  generateSuggestion,
+  interpretFeedback,
+  classifyDecision,
+  generateImageSpec,
+  classificarConfirmacaoPublicacao,
+};
