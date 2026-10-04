@@ -31,11 +31,11 @@ trabalho de redator pra fazer depois.
 
 IMPORTANTE SOBRE IMAGEM: pra post simples e carrossel, você NÃO precisa descrever a imagem pra um designer
 nem sugerir ferramentas externas (Canva, Photoshop, banco de imagens, Midjourney, DALL-E etc.) — isso já é
-automático. Assim que o Bruno aprovar, o sistema gera e manda a imagem pronta sozinho (usa uma foto real
-fixa da especialidade por padrão; se ele pedir algo "mais elaborado"/"capricha"/"gerado por IA", o sistema
-troca pra uma imagem gerada por IA). Nunca diga que não consegue gerar imagem, nem que isso é trabalho de
-designer/banco de imagens — se ele perguntar sobre a imagem, só confirme que ela vem pronta em seguida.
-Reel e story continuam sem imagem gerada (ele grava com o celular), então aí sim role e textos de tela bastam.
+automático. Assim que o Bruno aprovar, o sistema gera e manda a imagem pronta sozinho, usando IA (uma
+imagem por slide, já combinando com o conteúdo de cada um) — ele não precisa pedir nada extra pra isso
+acontecer. Nunca diga que não consegue gerar imagem, nem que isso é trabalho de designer/banco de imagens —
+se ele perguntar sobre a imagem, só confirme que ela vem pronta em seguida. Reel e story continuam sem
+imagem gerada (ele grava com o celular), então aí sim roteiro e textos de tela bastam.
 
 Responda sempre em português do Brasil.`;
 
@@ -75,9 +75,7 @@ async function interpretFeedback({ suggestion, feedbackText }) {
 
 // Classifica a resposta do Bruno numa decisão que o código consegue usar (diferente
 // de interpretFeedback, que gera só o texto de resposta pra ele). Usada pra saber se
-// deve disparar a geração das imagens depois de uma aprovação — e também se ele pediu
-// uma imagem mais elaborada (gerada por IA) pra esse post específico, em vez da foto
-// de banco padrão (ver imagemElaborada em generateImageSpec/render.js/webhook.js).
+// deve disparar a geração das imagens depois de uma aprovação.
 async function classifyDecision({ suggestion, feedbackText }) {
   const api = client();
   const msg = await api.messages.create({
@@ -86,7 +84,7 @@ async function classifyDecision({ suggestion, feedbackText }) {
     messages: [
       {
         role: "user",
-        content: `Esta foi a sugestão de post enviada pra aprovação:\n\n${suggestion}\n\nO Bruno respondeu:\n"${feedbackText}"\n\nClassifique a resposta dele. Responda APENAS com um JSON, sem nenhum texto antes ou depois, neste formato exato:\n{"decision":"aprovado"|"ajuste"|"rejeitado","imagemElaborada":true|false}\n\n"decision": "aprovado" = ele confirmou que gostou e pode seguir/publicar. "ajuste" = ele pediu alguma mudança ou está em dúvida. "rejeitado" = ele não quer esse post.\n\n"imagemElaborada": true SOMENTE se ele pediu explicitamente uma imagem mais elaborada / gerada por IA / diferente da foto padrão pra esse post (ex: "faz com uma imagem gerada por IA", "quero algo mais elaborado dessa vez", "pode caprichar na imagem", "gera uma imagem diferente pra esse"). Na dúvida, ou se ele não comentou nada sobre imagem, use false.`,
+        content: `Esta foi a sugestão de post enviada pra aprovação:\n\n${suggestion}\n\nO Bruno respondeu:\n"${feedbackText}"\n\nClassifique a resposta dele. Responda APENAS com um JSON, sem nenhum texto antes ou depois, em um destes três formatos exatos:\n{"decision":"aprovado"}\n{"decision":"ajuste"}\n{"decision":"rejeitado"}\n\n"aprovado" = ele confirmou que gostou e pode seguir/publicar. "ajuste" = ele pediu alguma mudança ou está em dúvida. "rejeitado" = ele não quer esse post.`,
       },
     ],
   });
@@ -95,28 +93,23 @@ async function classifyDecision({ suggestion, feedbackText }) {
   try {
     const parsed = JSON.parse(cleaned);
     if (["aprovado", "ajuste", "rejeitado"].includes(parsed.decision)) {
-      return {
-        decision: parsed.decision,
-        imagemElaborada: parsed.imagemElaborada === true,
-      };
+      return parsed.decision;
     }
   } catch (err) {
     console.error("[claude] classifyDecision: resposta não era o JSON esperado:", raw);
   }
-  return { decision: "ajuste", imagemElaborada: false }; // fallback seguro: se não deu pra classificar, não dispara geração de imagem à toa
+  return "ajuste"; // fallback seguro: se não deu pra classificar, não dispara geração de imagem à toa
 }
 
 // Depois que o Bruno aprova, converte a sugestão (texto corrido) numa estrutura de
 // slides pro renderizador (server/lib/render.js) desenhar as imagens de verdade.
-// `imagemElaborada` vem do classifyDecision — quando true, pede também um
-// "imagePrompt" por slide, pra gerar imagem por IA (ver server/lib/imagegen.js) em
-// vez de usar a foto de banco padrão. Esse prompt é escrito com cuidado pra evitar o
+// Sempre pede também um "imagePrompt" por slide, usado pra gerar uma imagem por IA
+// via OpenAI (ver server/lib/imagegen.js) — é o padrão agora pra todo post simples/
+// carrossel, não só quando pedido. Esse prompt é escrito com cuidado pra evitar o
 // risco de a IA errar detalhes anatômicos/diagnósticos de odontologia.
-async function generateImageSpec({ calendarItem, suggestionText, imagemElaborada }) {
+async function generateImageSpec({ calendarItem, suggestionText }) {
   const api = client();
-  const camposImagemIA = imagemElaborada
-    ? `\n- Inclua também em cada slide um campo "imagePrompt": uma descrição em inglês, curta (1-2 frases), pra gerar uma imagem por IA que combine com esse slide. IMPORTANTE: NÃO peça pra mostrar dentes, boca ou procedimentos de forma anatômica/diagnóstica (número de dentes, estrutura interna, close-up técnico) — a IA erra esse tipo de detalhe com frequência. Prefira cenas de ambiente/estilo de vida que combinem com o tema: consultório acolhedor, sorriso genérico à distância, mãos, texturas, bem-estar, iluminação natural.`
-    : "";
+  const camposImagemIA = `\n- Inclua também em cada slide um campo "imagePrompt": uma descrição em inglês, curta (1-2 frases), pra gerar uma imagem por IA que combine com esse slide. IMPORTANTE: NÃO peça pra mostrar dentes, boca ou procedimentos de forma anatômica/diagnóstica (número de dentes, estrutura interna, close-up técnico) — a IA erra esse tipo de detalhe com frequência. Prefira cenas de ambiente/estilo de vida que combinem com o tema: consultório acolhedor, sorriso genérico à distância, mãos, texturas, bem-estar, iluminação natural.`;
   const msg = await api.messages.create({
     model: "claude-sonnet-4-5",
     max_tokens: 1800,
