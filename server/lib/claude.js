@@ -67,7 +67,9 @@ async function interpretFeedback({ suggestion, feedbackText }) {
 
 // Classifica a resposta do Bruno numa decisão que o código consegue usar (diferente
 // de interpretFeedback, que gera só o texto de resposta pra ele). Usada pra saber se
-// deve disparar a geração das imagens depois de uma aprovação.
+// deve disparar a geração das imagens depois de uma aprovação — e também se ele pediu
+// uma imagem mais elaborada (gerada por IA) pra esse post específico, em vez da foto
+// de banco padrão (ver imagemElaborada em generateImageSpec/render.js/webhook.js).
 async function classifyDecision({ suggestion, feedbackText }) {
   const api = client();
   const msg = await api.messages.create({
@@ -76,7 +78,7 @@ async function classifyDecision({ suggestion, feedbackText }) {
     messages: [
       {
         role: "user",
-        content: `Esta foi a sugestão de post enviada pra aprovação:\n\n${suggestion}\n\nO Bruno respondeu:\n"${feedbackText}"\n\nClassifique a resposta dele. Responda APENAS com um JSON, sem nenhum texto antes ou depois, em um destes três formatos exatos:\n{"decision":"aprovado"}\n{"decision":"ajuste"}\n{"decision":"rejeitado"}\n\n"aprovado" = ele confirmou que gostou e pode seguir/publicar. "ajuste" = ele pediu alguma mudança ou está em dúvida. "rejeitado" = ele não quer esse post.`,
+        content: `Esta foi a sugestão de post enviada pra aprovação:\n\n${suggestion}\n\nO Bruno respondeu:\n"${feedbackText}"\n\nClassifique a resposta dele. Responda APENAS com um JSON, sem nenhum texto antes ou depois, neste formato exato:\n{"decision":"aprovado"|"ajuste"|"rejeitado","imagemElaborada":true|false}\n\n"decision": "aprovado" = ele confirmou que gostou e pode seguir/publicar. "ajuste" = ele pediu alguma mudança ou está em dúvida. "rejeitado" = ele não quer esse post.\n\n"imagemElaborada": true SOMENTE se ele pediu explicitamente uma imagem mais elaborada / gerada por IA / diferente da foto padrão pra esse post (ex: "faz com uma imagem gerada por IA", "quero algo mais elaborado dessa vez", "pode caprichar na imagem", "gera uma imagem diferente pra esse"). Na dúvida, ou se ele não comentou nada sobre imagem, use false.`,
       },
     ],
   });
@@ -85,21 +87,31 @@ async function classifyDecision({ suggestion, feedbackText }) {
   try {
     const parsed = JSON.parse(cleaned);
     if (["aprovado", "ajuste", "rejeitado"].includes(parsed.decision)) {
-      return parsed.decision;
+      return {
+        decision: parsed.decision,
+        imagemElaborada: parsed.imagemElaborada === true,
+      };
     }
   } catch (err) {
     console.error("[claude] classifyDecision: resposta não era o JSON esperado:", raw);
   }
-  return "ajuste"; // fallback seguro: se não deu pra classificar, não dispara geração de imagem à toa
+  return { decision: "ajuste", imagemElaborada: false }; // fallback seguro: se não deu pra classificar, não dispara geração de imagem à toa
 }
 
 // Depois que o Bruno aprova, converte a sugestão (texto corrido) numa estrutura de
 // slides pro renderizador (server/lib/render.js) desenhar as imagens de verdade.
-async function generateImageSpec({ calendarItem, suggestionText }) {
+// `imagemElaborada` vem do classifyDecision — quando true, pede também um
+// "imagePrompt" por slide, pra gerar imagem por IA (ver server/lib/imagegen.js) em
+// vez de usar a foto de banco padrão. Esse prompt é escrito com cuidado pra evitar o
+// risco de a IA errar detalhes anatômicos/diagnósticos de odontologia.
+async function generateImageSpec({ calendarItem, suggestionText, imagemElaborada }) {
   const api = client();
+  const camposImagemIA = imagemElaborada
+    ? `\n- Inclua também em cada slide um campo "imagePrompt": uma descrição em inglês, curta (1-2 frases), pra gerar uma imagem por IA que combine com esse slide. IMPORTANTE: NÃO peça pra mostrar dentes, boca ou procedimentos de forma anatômica/diagnóstica (número de dentes, estrutura interna, close-up técnico) — a IA erra esse tipo de detalhe com frequência. Prefira cenas de ambiente/estilo de vida que combinem com o tema: consultório acolhedor, sorriso genérico à distância, mãos, texturas, bem-estar, iluminação natural.`
+    : "";
   const msg = await api.messages.create({
     model: "claude-sonnet-4-5",
-    max_tokens: 1500,
+    max_tokens: 1800,
     system: SYSTEM_PROMPT,
     messages: [
       {
@@ -120,7 +132,7 @@ Regras:
 - "headline" = texto principal/destaque do slide, curto (até uns 60 caracteres).
 - "body" = texto de apoio, até uns 200 caracteres — pode ficar vazio na capa se não precisar.
 - "footer" = linha pequena opcional (ex: contato/CTA leve) — deixe vazio na maioria dos slides, use só no último.
-- Não inclua markdown (sem **negrito**, sem #), não inclua emojis em excesso, nada fora do JSON.`,
+- Não inclua markdown (sem **negrito**, sem #), não inclua emojis em excesso, nada fora do JSON.${camposImagemIA}`,
       },
     ],
   });
