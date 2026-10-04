@@ -5,6 +5,7 @@ const { interpretFeedback, classifyDecision, generateImageSpec } = require("../l
 const { transcribeAudio } = require("../lib/transcribe");
 const { load, save } = require("../lib/store");
 const { renderSlides } = require("../lib/render");
+const { gerarImagemIA } = require("../lib/imagegen");
 
 // Formatos que precisam de imagem pronta depois da aprovação (reel/story ficam só
 // no roteiro + textos de tela, porque o Bruno grava com o próprio celular).
@@ -14,13 +15,46 @@ function precisaDeImagem(format) {
 }
 
 // Gera as imagens da sugestão aprovada e manda pelo WhatsApp, uma por uma.
+// Se o Bruno pediu imagem mais elaborada (pendingSuggestion.imagemElaborada, vindo
+// do classifyDecision), tenta gerar uma imagem por IA pra cada slide via OpenAI
+// (server/lib/imagegen.js); se a chave não estiver configurada ou alguma geração
+// falhar, cai de volta pro fluxo padrão (foto de banco/ícone) sem travar o post.
 async function gerarEEnviarImagens({ to, pendingSuggestion }) {
   await sendText(to, "Show! Gerando as imagens do post, só um instante... 🎨");
+  const imagemElaborada = !!pendingSuggestion.imagemElaborada;
   const spec = await generateImageSpec({
     calendarItem: pendingSuggestion.calendarItem,
     suggestionText: pendingSuggestion.text,
+    imagemElaborada,
   });
-  const pngBuffers = await renderSlides(spec.slides);
+  const especialidade =
+    pendingSuggestion.calendarItem?.especialidade || pendingSuggestion.calendarItem?.title;
+
+  let imagensIA = null;
+  if (imagemElaborada) {
+    if (!process.env.OPENAI_API_KEY) {
+      await sendText(
+        to,
+        "Você pediu uma imagem mais elaborada, mas a geração por IA ainda não tá configurada aqui no servidor (falta a chave da OpenAI). Vou seguir com a foto padrão por enquanto."
+      );
+    } else {
+      imagensIA = [];
+      for (const slide of spec.slides) {
+        if (!slide.imagePrompt) {
+          imagensIA.push(null);
+          continue;
+        }
+        try {
+          imagensIA.push(await gerarImagemIA(slide.imagePrompt));
+        } catch (err) {
+          console.error("[webhook] falha ao gerar imagem por IA de um slide:", err.message);
+          imagensIA.push(null); // esse slide cai pro padrão (foto de banco/texto), não trava o post inteiro
+        }
+      }
+    }
+  }
+
+  const pngBuffers = await renderSlides(spec.slides, especialidade, pendingSuggestion.date, imagensIA);
   for (let i = 0; i < pngBuffers.length; i++) {
     const mediaId = await uploadMedia(pngBuffers[i]);
     const isUltima = i === pngBuffers.length - 1;
@@ -78,7 +112,7 @@ router.post("/", async (req, res) => {
     });
     await sendText(from, reply);
 
-    const decision = await classifyDecision({
+    const { decision, imagemElaborada } = await classifyDecision({
       suggestion: state.pendingSuggestion.text,
       feedbackText: text,
     });
@@ -87,6 +121,7 @@ router.post("/", async (req, res) => {
 
     if (decision === "aprovado") {
       state.pendingSuggestion.status = "aprovado";
+      state.pendingSuggestion.imagemElaborada = imagemElaborada;
       save(state); // salva a aprovação já, antes de tentar gerar imagem (que pode falhar)
 
       if (precisaDeImagem(state.pendingSuggestion.format)) {
