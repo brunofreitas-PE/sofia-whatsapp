@@ -109,7 +109,10 @@ async function classifyDecision({ suggestion, feedbackText }) {
 // risco de a IA errar detalhes anatômicos/diagnósticos de odontologia.
 async function generateImageSpec({ calendarItem, suggestionText }) {
   const api = client();
-  const camposImagemIA = `\n- Inclua também em cada slide um campo "imagePrompt": uma descrição em inglês, curta (1-2 frases), pra gerar uma imagem por IA que combine com esse slide. IMPORTANTE: NÃO peça pra mostrar dentes, boca ou procedimentos de forma anatômica/diagnóstica (número de dentes, estrutura interna, close-up técnico) — a IA erra esse tipo de detalhe com frequência. Prefira cenas de ambiente/estilo de vida que combinem com o tema: consultório acolhedor, sorriso genérico à distância, mãos, texturas, bem-estar, iluminação natural.`;
+  const camposImagemIA = `\n- Inclua também em cada slide um campo "imagePrompt": uma descrição em inglês, específica e visual (2-3 frases), pra gerar uma imagem por IA que combine com ESSE slide em particular — baseada no headline/body que você mesmo escreveu pra ele, não um prompt genérico que serviria pra qualquer post. IMPORTANTE:
+  - NÃO peça pra mostrar dentes, boca ou procedimentos de forma anatômica/diagnóstica (número de dentes, estrutura interna, close-up técnico) — a IA erra esse tipo de detalhe com frequência.
+  - NÃO repita sempre a mesma cena de "cadeira odontológica vazia num consultório claro com planta no canto" — isso fica repetitivo entre posts e entre slides do mesmo carrossel. Varie de verdade a cada slide: pode ser um detalhe de mãos (segurando um alinhador transparente, um modelo de prótese, um espelho de mão), uma pessoa sorrindo de forma confiante e à distância seguro (sem foco nos dentes), uma textura ou material (cerâmica, resina, luz entrando por uma janela), um momento de bem-estar fora do consultório (harmonização facial pode ser um momento de cuidado/spa, por exemplo), um detalhe arquitetônico ou decorativo diferente do consultório, ou um objeto relacionado ao tema (escova, fio dental, estojo de alinhador).
+  - Pense no que ESSE slide específico está dizendo e escolha uma cena que ilustre essa ideia particular, não uma cena-padrão repetida.`;
   const msg = await api.messages.create({
     model: "claude-sonnet-4-5",
     max_tokens: 1800,
