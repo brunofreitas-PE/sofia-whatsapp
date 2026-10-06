@@ -1,9 +1,15 @@
 // Agendador: dispara a sugestão do dia e os lembretes de publicação.
 // Horários em cron (fuso do servidor — configure TZ=America/Sao_Paulo no Railway).
 const cron = require("node-cron");
-const { sendText } = require("./whatsapp");
+const { sendText, sendTemplate } = require("./whatsapp");
 const { generateSuggestion } = require("./claude");
 const { load, save } = require("./store");
+
+// Template aprovado pela Meta (ver server/lib/whatsapp.js) — usado pra avisar o
+// Bruno às 8h mesmo quando a janela de 24h está fechada (ele não precisa
+// interagir todo dia). O corpo é fixo, sem variáveis.
+const TEMPLATE_SUGESTAO_DIARIA = "sugestao_diaria";
+const TEMPLATE_IDIOMA = "pt_BR";
 
 // As 5 especialidades do Atelier do Sorriso — únicos temas que a Sofia pode sugerir
 // (ver também a regra equivalente no SYSTEM_PROMPT de server/lib/claude.js).
@@ -47,7 +53,12 @@ async function runDailySuggestionNow() {
   // fiel ao que vai ser gerado de verdade na aprovação (ver claude.js e
   // gerarEEnviarImagens em server/routes/webhook.js).
   const { text, slides } = await generateSuggestion({ calendarItem });
-  await sendText(owner, text);
+  // A Sofia é quem inicia a conversa aqui (o Bruno não mandou nada antes) — se a
+  // janela de 24h dele estiver fechada, um texto livre seria recusado pela API do
+  // WhatsApp sem aviso nenhum. Por isso manda só o template aprovado agora (isso
+  // funciona mesmo com a janela fechada); a mensagem completa só sai quando o
+  // Bruno responder — ver o tratamento de `textoEnviado` em webhook.js.
+  await sendTemplate(owner, TEMPLATE_SUGESTAO_DIARIA, TEMPLATE_IDIOMA);
   // Guardamos format + calendarItem + slides junto, não só o texto — são usados
   // depois na hora de gerar/renderizar a imagem quando o Bruno aprovar.
   state.pendingSuggestion = {
@@ -55,6 +66,7 @@ async function runDailySuggestionNow() {
     text,
     slides,
     status: "aguardando",
+    textoEnviado: false, // vira true em webhook.js quando a sugestão completa for enviada
     format: calendarItem.format,
     calendarItem,
   };
