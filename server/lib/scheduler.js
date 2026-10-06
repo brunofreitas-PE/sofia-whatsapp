@@ -31,6 +31,22 @@ function especialidadeDoDia(date) {
   return ESPECIALIDADES[diaDoAno % ESPECIALIDADES.length];
 }
 
+// Igual à rotação de especialidade acima, mas pro FORMATO do post — usada no
+// mesmo lugar (fallback de quando não há item específico no calendário pro dia).
+// Antes disso o formato ficava fixo em "post simples" nesse fallback, e como o
+// calendário nunca é preenchido na prática, todo dia caía nesse mesmo fallback —
+// por isso só vinha post simples, sempre. 7 posições (coprimo com as 5
+// especialidades) pra combinação especialidade×formato variar bastante antes de
+// repetir. Post simples continua sendo o mais comum (é o mais rápido/barato),
+// mas carrossel, story e reel aparecem com frequência real agora.
+const FORMATOS = ["post simples", "carrossel", "post simples", "story", "carrossel", "post simples", "reel"];
+
+function formatoDoDia(date) {
+  const inicioDoAno = new Date(Date.UTC(date.getUTCFullYear(), 0, 1));
+  const diaDoAno = Math.floor((date - inicioDoAno) / 86400000);
+  return FORMATOS[diaDoAno % FORMATOS.length];
+}
+
 // Lógica da sugestão do dia, isolada numa função própria pra poder ser chamada
 // tanto pelo cron das 8h quanto por uma rota de teste manual (ver server/index.js).
 async function runDailySuggestionNow() {
@@ -42,11 +58,11 @@ async function runDailySuggestionNow() {
     state.calendar.find((i) => i.date === today) || {
       date: today,
       pillar: "educativo",
-      format: "post simples",
+      format: formatoDoDia(agora),
       especialidade: especialidadeDoDia(agora),
       title: `Especialidade do dia (sem item específico no calendário): ${especialidadeDoDia(
         agora
-      )}`,
+      )}, formato: ${formatoDoDia(agora)}`,
     };
   // generateSuggestion já devolve a mensagem E os slides (com imagePrompt) numa
   // resposta só — isso garante que a prévia de imagem que o Bruno lê no WhatsApp é
