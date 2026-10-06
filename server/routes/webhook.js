@@ -118,6 +118,19 @@ router.post("/", async (req, res) => {
       return;
     }
 
+    // Às 8h a Sofia manda só um template (ver scheduler.js), porque a janela de
+    // 24h pode estar fechada — a sugestão completa fica guardada, esperando o
+    // Bruno responder qualquer coisa pra reabrir a janela. Essa é exatamente essa
+    // primeira resposta: manda a sugestão de verdade agora, e NÃO trata essa
+    // mensagem como feedback sobre um conteúdo que ele ainda nem viu (por isso
+    // retorna aqui, sem cair no interpretFeedback/classifyDecision abaixo).
+    if (state.pendingSuggestion.textoEnviado === false) {
+      await sendText(from, state.pendingSuggestion.text);
+      state.pendingSuggestion.textoEnviado = true;
+      save(state);
+      return;
+    }
+
     // Se o post já foi aprovado antes, a mensagem pode ser só o Bruno avisando que
     // já publicou (ex: "postei") — isso não é feedback sobre o CONTEÚDO da
     // sugestão, então não faz sentido passar pelo interpretFeedback/classifyDecision
