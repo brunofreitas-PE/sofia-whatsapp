@@ -98,7 +98,28 @@ router.post("/", async (req, res) => {
     const entry = req.body?.entry?.[0];
     const change = entry?.changes?.[0]?.value;
     const message = change?.messages?.[0];
-    if (!message) return; // status update (entregue/lido), não é mensagem nova
+
+    if (!message) {
+      // Não é mensagem nova — pode ser um status (enviado/entregue/lido/FALHOU) de
+      // uma mensagem que a própria Sofia mandou (ex: o template das 8h). A Meta manda
+      // isso pra cá, mas antes a gente simplesmente ignorava — por isso uma falha de
+      // entrega do template nunca aparecia em lugar nenhum. Agora loga no Railway
+      // (aba Deployments > View Logs) pra dar pra investigar.
+      const statuses = change?.statuses;
+      if (Array.isArray(statuses)) {
+        for (const s of statuses) {
+          if (s.status === "failed") {
+            console.error(
+              `[webhook] FALHA ao entregar mensagem (id ${s.id}):`,
+              JSON.stringify(s.errors || s, null, 2)
+            );
+          } else {
+            console.log(`[webhook] status da mensagem ${s.id}: ${s.status}`);
+          }
+        }
+      }
+      return;
+    }
 
     const from = message.from;
     let text = null;
