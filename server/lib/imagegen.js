@@ -31,7 +31,7 @@ async function gerarImagemIA(prompt) {
     model: "gpt-image-1",
     prompt,
     size: "1024x1536", // retrato — mais perto da proporção 4:5 do card (1080x1350)
-    quality: "medium", // meio-termo custo/qualidade; dá pra subir pra "high" se quiser mais capricho
+    quality: "high", // o Bruno pediu imagens mais elaboradas/caprichadas — custa mais que "medium", mas sai bem mais rica em detalhe
   });
   const b64 = resp.data[0]?.b64_json;
   if (!b64) {
