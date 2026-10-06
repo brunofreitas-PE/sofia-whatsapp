@@ -19,17 +19,31 @@ function precisaDeImagem(format) {
   return f.includes("post simples") || f.includes("carross");
 }
 
-// Gera as imagens da sugestão aprovada e manda pelo WhatsApp, uma por uma. Toda
-// imagem (capa do post simples, ou cada slide do carrossel) é gerada por IA via
-// OpenAI (server/lib/imagegen.js) — é o padrão agora, não precisa pedir. Se a chave
-// não estiver configurada, ou a geração de algum slide falhar, esse slide cai de
-// volta pro fluxo padrão (foto de banco/ícone) em vez de travar o post inteiro.
+// Gera as imagens da sugestão aprovada e manda pelo WhatsApp, uma por uma. Os
+// slides (com o imagePrompt de cada imagem) já vêm prontos desde a hora em que a
+// sugestão foi gerada (ver generateSuggestion em claude.js e scheduler.js) — assim a
+// imagem gerada aqui é garantidamente a mesma que o Bruno já viu descrita na
+// mensagem original, em vez de duas chamadas desconectadas. Só cai no
+// generateImageSpec (fallback) se por algum motivo não tiver slides salvos (ex:
+// sugestão antiga, de antes dessa versão). Toda imagem (capa do post simples, ou
+// cada slide do carrossel) é gerada por IA via OpenAI (server/lib/imagegen.js). Se a
+// chave não estiver configurada, ou a geração de algum slide falhar, esse slide cai
+// de volta pro fluxo padrão (foto de banco/ícone) em vez de travar o post inteiro.
 async function gerarEEnviarImagens({ to, pendingSuggestion }) {
   await sendText(to, "Show! Gerando as imagens do post, só um instante... 🎨");
-  const spec = await generateImageSpec({
-    calendarItem: pendingSuggestion.calendarItem,
-    suggestionText: pendingSuggestion.text,
-  });
+
+  let slides = pendingSuggestion.slides;
+  if (!Array.isArray(slides) || slides.length === 0) {
+    console.error(
+      "[webhook] sugestão pendente sem slides salvos — usando generateImageSpec como fallback."
+    );
+    const spec = await generateImageSpec({
+      calendarItem: pendingSuggestion.calendarItem,
+      suggestionText: pendingSuggestion.text,
+    });
+    slides = spec.slides;
+  }
+
   const especialidade =
     pendingSuggestion.calendarItem?.especialidade || pendingSuggestion.calendarItem?.title;
 
@@ -38,7 +52,7 @@ async function gerarEEnviarImagens({ to, pendingSuggestion }) {
     console.error("[webhook] OPENAI_API_KEY não configurada — usando foto de banco/ícone no lugar da IA.");
   } else {
     imagensIA = [];
-    for (const slide of spec.slides) {
+    for (const slide of slides) {
       if (!slide.imagePrompt) {
         imagensIA.push(null);
         continue;
@@ -52,7 +66,7 @@ async function gerarEEnviarImagens({ to, pendingSuggestion }) {
     }
   }
 
-  const pngBuffers = await renderSlides(spec.slides, especialidade, pendingSuggestion.date, imagensIA);
+  const pngBuffers = await renderSlides(slides, especialidade, pendingSuggestion.date, imagensIA);
   for (let i = 0; i < pngBuffers.length; i++) {
     const mediaId = await uploadMedia(pngBuffers[i]);
     const isUltima = i === pngBuffers.length - 1;
