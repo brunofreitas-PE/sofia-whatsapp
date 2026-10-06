@@ -28,6 +28,35 @@ async function carregarFotoDaEspecialidade(especialidade) {
   }
 }
 
+// Logo real do Atelier do Sorriso (server/logo.png, .jpg ou .jpeg — o primeiro
+// que existir, direto dentro de server/, junto com as fontes). Se nenhum arquivo
+// existir, o card cai de volta pro texto "ATELIER DO SORRISO" de sempre — então
+// dá pra fazer deploy antes de ter a logo pronta, sem quebrar nada. PNG com fundo
+// transparente é o ideal pro card navy; JPG funciona, mas vem com fundo
+// (geralmente branco) por cima do card.
+const LOGO_CANDIDATES = ["logo.png", "logo.jpg", "logo.jpeg"].map((f) =>
+  path.join(__dirname, "..", f)
+);
+let logoPromise = null;
+function carregarLogo() {
+  if (!logoPromise) {
+    logoPromise = (async () => {
+      for (const file of LOGO_CANDIDATES) {
+        if (fs.existsSync(file)) {
+          try {
+            return await loadImage(file);
+          } catch (err) {
+            console.error(`[render] falha ao carregar logo (${file}):`, err.message);
+            return null;
+          }
+        }
+      }
+      return null; // nenhum arquivo de logo ainda — cai pro texto
+    })();
+  }
+  return logoPromise; // cacheada: o arquivo não muda entre slides nem entre posts
+}
+
 const FONT_FAMILY = "SofiaSans";
 GlobalFonts.registerFromPath(path.join(__dirname, "../Sans-Regular.ttf"), FONT_FAMILY);
 GlobalFonts.registerFromPath(path.join(__dirname, "../Sans-Bold.ttf"), FONT_FAMILY);
@@ -177,10 +206,40 @@ async function drawSlide({ headline, body, footer }, index, total, especialidade
     y += 50;
   }
 
-  // Marca
-  ctx.font = `700 30px "${FONT_FAMILY}"`;
-  ctx.fillStyle = RED;
-  ctx.fillText("ATELIER DO SORRISO", marginX, HEIGHT - 150);
+  // Marca — logo real (server/assets/logo.*), se existir; senão o texto de sempre.
+  // Mesma posição nos dois casos (apoiada na mesma linha, perto do rodapé). A
+  // maioria das logos é desenhada pra fundo claro (texto escuro, traços finos),
+  // então fica ilegível solta em cima do navy do card — por isso desenhamos uma
+  // "placa" clara atrás dela, do tamanho da logo + uma margem, pra ela aparecer
+  // do jeito que foi desenhada.
+  const logo = await carregarLogo();
+  if (logo) {
+    // Centro vertical fixo pra placa+logo, acima da linha do rodapé opcional
+    // (HEIGHT-100) com folga suficiente pra nunca encostar nele.
+    const logoCenterY = HEIGHT - 185;
+    const maxLogoW = 220;
+    const targetH = 50;
+    let logoH = targetH;
+    let logoW = (logo.width / logo.height) * logoH;
+    if (logoW > maxLogoW) {
+      logoW = maxLogoW;
+      logoH = (logo.height / logo.width) * logoW;
+    }
+    const logoX = marginX;
+    const logoY = logoCenterY - logoH / 2;
+    const pad = 14;
+    ctx.save();
+    ctx.fillStyle = "#f4f6f8"; // branco levemente acinzentado, mais confortável que branco puro
+    ctx.beginPath();
+    ctx.roundRect(logoX - pad, logoY - pad, logoW + pad * 2, logoH + pad * 2, 14);
+    ctx.fill();
+    ctx.restore();
+    ctx.drawImage(logo, logoX, logoY, logoW, logoH);
+  } else {
+    ctx.font = `700 30px "${FONT_FAMILY}"`;
+    ctx.fillStyle = RED;
+    ctx.fillText("ATELIER DO SORRISO", marginX, HEIGHT - 150);
+  }
 
   // Rodapé opcional
   if (footer) {
