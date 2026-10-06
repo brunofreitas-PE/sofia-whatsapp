@@ -188,6 +188,16 @@ router.post("/", async (req, res) => {
       state.pendingSuggestion.status = "aprovado";
       save(state); // salva a aprovação já, antes de tentar gerar imagem (que pode falhar)
 
+      // O "reply" do interpretFeedback acima é só uma confirmação curta (ex: resumo do
+      // post) — ele NÃO garante que a legenda/hashtags de verdade estejam escritas por
+      // extenso ali (às vezes só descreve o que a legenda deve conter, em vez de
+      // reproduzir o texto). Pra garantir que o Bruno sempre tenha a copy pronta pra
+      // copiar e colar — mesmo que ele já tenha recebido isso antes, lá no início da
+      // conversa —, reenvia aqui o texto completo original (pendingSuggestion.text),
+      // sempre junto da aprovação, antes (ou no lugar, se não precisar de imagem) das
+      // imagens.
+      await sendText(from, state.pendingSuggestion.text);
+
       if (precisaDeImagem(state.pendingSuggestion.format)) {
         try {
           await gerarEEnviarImagens({ to: from, pendingSuggestion: state.pendingSuggestion });
