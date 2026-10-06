@@ -37,23 +37,29 @@ async function runDailySuggestionNow() {
       date: today,
       pillar: "educativo",
       format: "post simples",
+      especialidade: especialidadeDoDia(agora),
       title: `Especialidade do dia (sem item específico no calendário): ${especialidadeDoDia(
         agora
       )}`,
     };
-  const suggestion = await generateSuggestion({ calendarItem });
-  await sendText(owner, suggestion);
-  // Guardamos format + calendarItem junto, não só o texto — são usados depois pra
-  // saber se precisa gerar imagem quando o Bruno aprovar (ver server/routes/webhook.js).
+  // generateSuggestion já devolve a mensagem E os slides (com imagePrompt) numa
+  // resposta só — isso garante que a prévia de imagem que o Bruno lê no WhatsApp é
+  // fiel ao que vai ser gerado de verdade na aprovação (ver claude.js e
+  // gerarEEnviarImagens em server/routes/webhook.js).
+  const { text, slides } = await generateSuggestion({ calendarItem });
+  await sendText(owner, text);
+  // Guardamos format + calendarItem + slides junto, não só o texto — são usados
+  // depois na hora de gerar/renderizar a imagem quando o Bruno aprovar.
   state.pendingSuggestion = {
     date: today,
-    text: suggestion,
+    text,
+    slides,
     status: "aguardando",
     format: calendarItem.format,
     calendarItem,
   };
   save(state);
-  return suggestion;
+  return text;
 }
 
 function start() {
