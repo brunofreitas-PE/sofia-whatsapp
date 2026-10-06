@@ -29,34 +29,81 @@ Sua função: sugerir o post do dia (story, reel, post simples ou carrossel), en
 legenda, hashtags, e pra reel/story: roteiro, cenas, textos de tela, sugestão de trilha. Nunca deixe
 trabalho de redator pra fazer depois.
 
-IMPORTANTE SOBRE IMAGEM: pra post simples e carrossel, NÃO inclua nenhuma descrição, sugestão ou "briefing"
-de como a imagem deveria ser (nada de "sugestão prática", "composição visual", descrição de cores/fundo/
-elementos etc.) — isso é decidido automaticamente por outro processo, separado desta conversa, depois que o
-Bruno aprovar, então qualquer coisa que você escrever aqui sobre a imagem NÃO vai bater com a imagem de
-verdade e só vai confundir. Não descreva a imagem pra um designer nem sugira ferramentas externas (Canva,
-Photoshop, banco de imagens, Midjourney, DALL-E etc.). Nunca diga que não consegue gerar imagem, nem que
-isso é trabalho de designer/banco de imagens — se ele perguntar sobre a imagem, só confirme que ela vem
-pronta automaticamente em seguida, sem detalhar como vai ser. Reel e story continuam sem imagem gerada (ele
-grava com o celular), então aí sim roteiro e textos de tela bastam.
+IMPORTANTE SOBRE IMAGEM: pra post simples e carrossel, a imagem de cada slide é gerada por IA junto com o
+resto desse post, na mesma resposta — então a prévia que você descrever (campo "slides", e a seção
+"📸 IMAGEM(NS)" dentro da mensagem) É a imagem de verdade que vai ser gerada depois, não um briefing solto
+pra um designer. Nunca sugira ferramentas externas (Canva, Photoshop, banco de imagens, Midjourney, DALL-E
+etc.) nem diga que não consegue gerar imagem — o sistema já faz isso sozinho a partir do que você descrever
+em "slides". Reel e story não geram imagem (o Bruno grava com o celular), então aí sim roteiro e textos de
+tela bastam, sem campo de imagem.
 
 Responda sempre em português do Brasil.`;
 
+// Instruções compartilhadas pros campos de imagem gerada por IA (imagePrompt em
+// inglês pra OpenAI, imagePromptPt em português pra prévia do Bruno). Usado tanto
+// em generateSuggestion (fluxo normal, gera tudo numa única resposta) quanto em
+// generateImageSpec (fallback defensivo, ver mais abaixo). Pede uma descrição bem
+// detalhada/elaborada — luz, composição, textura, estilo — porque o Bruno pediu
+// imagens mais ricas, e insiste em variar a cena a cada slide (evitar convergir
+// sempre pra "cadeira odontológica vazia").
+const CAMPOS_IMAGEM_IA = `
+- Inclua também em cada slide um campo "imagePrompt": uma descrição em inglês, bem detalhada e elaborada (4 a 6 frases), descrevendo cena, composição (enquadramento, regra dos terços), iluminação (ex: luz natural lateral, golden hour, luz suave de estúdio), textura/material, paleta de cores e um estilo fotográfico consistente (ex: fotografia editorial, lifestyle, still life) — pra gerar uma imagem por IA rica e elaborada que combine com ESSE slide em particular, baseada no headline/body que você mesmo escreveu pra ele, não um prompt genérico que serviria pra qualquer post. IMPORTANTE:
+  - NÃO peça pra mostrar dentes, boca ou procedimentos de forma anatômica/diagnóstica (número de dentes, estrutura interna, close-up técnico) — a IA erra esse tipo de detalhe com frequência.
+  - NÃO repita sempre a mesma cena de "cadeira odontológica vazia num consultório claro com planta no canto" — isso fica repetitivo entre posts e entre slides do mesmo carrossel. Varie de verdade a cada slide: pode ser um detalhe de mãos (segurando um alinhador transparente, um modelo de prótese, um espelho de mão), uma pessoa sorrindo de forma confiante e à distância segura (sem foco nos dentes), uma textura ou material (cerâmica, resina, luz entrando por uma janela), um momento de bem-estar fora do consultório (harmonização facial pode ser um momento de cuidado/spa, por exemplo), um detalhe arquitetônico ou decorativo diferente do consultório, ou um objeto relacionado ao tema (escova, fio dental, estojo de alinhador).
+  - Pense no que ESSE slide específico está dizendo e escolha uma cena que ilustre essa ideia particular, não uma cena-padrão repetida.
+  - Capriche nos detalhes sensoriais (luz, profundidade de campo, textura) pra imagem sair elaborada — sem exagerar a ponto de ficar artificial ou carregada.
+- Inclua também um campo "imagePromptPt": a MESMA cena descrita em "imagePrompt", só que em português e resumida numa frase curta e natural — isso vai aparecer pro Bruno na mensagem como prévia, então tem que descrever exatamente a mesma cena (só traduzida/resumida), nunca uma cena diferente da que vai ser gerada de verdade.`;
+
+// Gera a sugestão do dia: o texto completo pro WhatsApp (legenda, hashtags, roteiro
+// se for reel/story) E, no mesmo call, a estrutura de slides + imagePrompt de cada
+// imagem — tudo isso numa resposta só, pra garantir que a prévia que o Bruno lê
+// (dentro de "mensagem", na seção "📸 IMAGEM(NS)") seja fiel à imagem que de fato vai
+// ser gerada depois (ver gerarEEnviarImagens em server/routes/webhook.js), em vez de
+// duas chamadas desconectadas descrevendo coisas diferentes.
 async function generateSuggestion({ calendarItem }) {
   const api = client();
   const msg = await api.messages.create({
     model: "claude-sonnet-4-5",
-    max_tokens: 1500,
+    max_tokens: 3000,
     system: SYSTEM_PROMPT,
     messages: [
       {
         role: "user",
         content: `Gere a sugestão de post de hoje com base neste item do calendário: ${JSON.stringify(
           calendarItem
-        )}`,
+        )}
+
+Responda APENAS com um JSON válido, sem nenhum texto antes ou depois, neste formato exato:
+{"mensagem":"...","slides":[{"headline":"...","body":"...","footer":"...","imagePrompt":"...","imagePromptPt":"..."}]}
+
+Regras:
+- "mensagem" = o texto completo que o Bruno vai receber no WhatsApp: legenda, hashtags, e pra reel/story o roteiro, cenas, textos de tela e sugestão de trilha — o pacote completo, como sempre.
+- Se o formato for "reel" ou "story", "slides" deve ser um array vazio ([]) — esses formatos não geram imagem por IA (o Bruno grava com o celular).
+- Se o formato for "post simples", gere exatamente 1 slide em "slides".
+- Se o formato for "carrossel", gere entre 4 e 6 slides em "slides" (capa, pontos principais, CTA final).
+- "headline" = texto principal/destaque do slide, curto (até uns 60 caracteres).
+- "body" = texto de apoio, até uns 200 caracteres — pode ficar vazio na capa se não precisar.
+- "footer" = linha pequena opcional (ex: contato/CTA leve) — deixe vazio na maioria dos slides, use só no último.${CAMPOS_IMAGEM_IA}
+- Se "slides" não vier vazio, inclua dentro de "mensagem" (perto do final, antes das hashtags) uma seção assim, usando exatamente o "imagePromptPt" de cada slide (só numerado), pra ser a prévia fiel do que vai ser gerado:
+
+📸 IMAGEM(NS):
+1. <imagePromptPt do slide 1>
+2. <imagePromptPt do slide 2>
+(uma linha por slide)
+
+- Não inclua markdown dentro dos campos (sem **negrito**, sem #), nada fora do JSON.`,
       },
     ],
   });
-  return msg.content[0].text;
+  const raw = msg.content[0].text.trim();
+  const cleaned = raw.replace(/^```(json)?/i, "").replace(/```$/, "").trim();
+  const parsed = JSON.parse(cleaned); // deixa propagar o erro se vier mal formado — quem chama decide o que fazer
+  if (typeof parsed.mensagem !== "string" || !Array.isArray(parsed.slides)) {
+    throw new Error(
+      "generateSuggestion: resposta não trouxe o formato esperado ({mensagem, slides})"
+    );
+  }
+  return { text: parsed.mensagem, slides: parsed.slides };
 }
 
 async function interpretFeedback({ suggestion, feedbackText }) {
@@ -103,18 +150,13 @@ async function classifyDecision({ suggestion, feedbackText }) {
   return "ajuste"; // fallback seguro: se não deu pra classificar, não dispara geração de imagem à toa
 }
 
-// Depois que o Bruno aprova, converte a sugestão (texto corrido) numa estrutura de
-// slides pro renderizador (server/lib/render.js) desenhar as imagens de verdade.
-// Sempre pede também um "imagePrompt" por slide, usado pra gerar uma imagem por IA
-// via OpenAI (ver server/lib/imagegen.js) — é o padrão agora pra todo post simples/
-// carrossel, não só quando pedido. Esse prompt é escrito com cuidado pra evitar o
-// risco de a IA errar detalhes anatômicos/diagnósticos de odontologia.
+// Fallback DEFENSIVO: só é chamado por webhook.js quando uma sugestão pendente não
+// tem "slides" salvos (por exemplo, state antigo gerado antes dessa versão, que
+// guardava só o texto). No fluxo normal os slides já vêm prontos de
+// generateSuggestion, gerados junto com a mensagem — então essa função não roda mais
+// no dia a dia.
 async function generateImageSpec({ calendarItem, suggestionText }) {
   const api = client();
-  const camposImagemIA = `\n- Inclua também em cada slide um campo "imagePrompt": uma descrição em inglês, específica e visual (2-3 frases), pra gerar uma imagem por IA que combine com ESSE slide em particular — baseada no headline/body que você mesmo escreveu pra ele, não um prompt genérico que serviria pra qualquer post. IMPORTANTE:
-  - NÃO peça pra mostrar dentes, boca ou procedimentos de forma anatômica/diagnóstica (número de dentes, estrutura interna, close-up técnico) — a IA erra esse tipo de detalhe com frequência.
-  - NÃO repita sempre a mesma cena de "cadeira odontológica vazia num consultório claro com planta no canto" — isso fica repetitivo entre posts e entre slides do mesmo carrossel. Varie de verdade a cada slide: pode ser um detalhe de mãos (segurando um alinhador transparente, um modelo de prótese, um espelho de mão), uma pessoa sorrindo de forma confiante e à distância seguro (sem foco nos dentes), uma textura ou material (cerâmica, resina, luz entrando por uma janela), um momento de bem-estar fora do consultório (harmonização facial pode ser um momento de cuidado/spa, por exemplo), um detalhe arquitetônico ou decorativo diferente do consultório, ou um objeto relacionado ao tema (escova, fio dental, estojo de alinhador).
-  - Pense no que ESSE slide específico está dizendo e escolha uma cena que ilustre essa ideia particular, não uma cena-padrão repetida.`;
   const msg = await api.messages.create({
     model: "claude-sonnet-4-5",
     max_tokens: 1800,
@@ -138,7 +180,7 @@ Regras:
 - "headline" = texto principal/destaque do slide, curto (até uns 60 caracteres).
 - "body" = texto de apoio, até uns 200 caracteres — pode ficar vazio na capa se não precisar.
 - "footer" = linha pequena opcional (ex: contato/CTA leve) — deixe vazio na maioria dos slides, use só no último.
-- Não inclua markdown (sem **negrito**, sem #), não inclua emojis em excesso, nada fora do JSON.${camposImagemIA}`,
+- Não inclua markdown (sem **negrito**, sem #), não inclua emojis em excesso, nada fora do JSON.${CAMPOS_IMAGEM_IA}`,
       },
     ],
   });
