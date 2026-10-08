@@ -4,7 +4,17 @@
 const fs = require("fs");
 const path = require("path");
 
-const DB_PATH = path.join(__dirname, "..", "data", "db.json");
+// Onde o arquivo de dados fica salvo. Por padrão é uma pasta dentro do próprio
+// código (server/data) — só que, no Railway, o filesystem é EFÊMERO: some todo
+// deploy, e a Sofia "esquece" tudo (sugestão pendente, histórico). A correção é
+// um Railway Volume (disco que sobrevive a deploys), montado num caminho — mas em
+// vez de o código ter que adivinhar/acertar exatamente onde o Railway coloca os
+// arquivos do projeto (ex: /app/server/data), a variável de ambiente opcional
+// DATA_DIR deixa escolher: configure o Volume pra montar em, por exemplo, /data,
+// e defina DATA_DIR=/data no Railway — os dois precisam ser o MESMO caminho. Sem
+// essa variável definida, nada muda (continua gravando em server/data, como antes).
+const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "..", "data");
+const DB_PATH = path.join(DATA_DIR, "db.json");
 
 function defaultState() {
   return {
