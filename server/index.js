@@ -3,6 +3,7 @@ const express = require("express");
 const webhookRoute = require("./routes/webhook");
 const scheduler = require("./lib/scheduler");
 const { registerPhoneNumber } = require("./lib/whatsapp");
+const store = require("./lib/store");
 
 const app = express();
 app.use(express.json());
@@ -111,6 +112,23 @@ app.get("/debug/registrar-numero", async (req, res) => {
       ? JSON.stringify(err.response.data, null, 2)
       : err.message;
     res.status(500).type("text/plain").send("Erro: " + detalhe);
+  }
+});
+
+// Rota temporária só pra testar se o Railway Volume (DATA_DIR) está persistindo os
+// dados entre deploys — mostra o estado salvo agora (sugestão pendente, histórico).
+// Uso: chamar antes e depois de um redeploy e comparar — se continuar igual depois
+// do redeploy, o volume está funcionando. Pode remover depois de confirmado.
+app.get("/debug/estado", (req, res) => {
+  if (req.query.token !== process.env.WHATSAPP_VERIFY_TOKEN) {
+    return res.sendStatus(403);
+  }
+  try {
+    const state = store.load();
+    res.type("text/plain").send(JSON.stringify(state, null, 2));
+  } catch (err) {
+    console.error("[debug] falha ao ler estado:", err);
+    res.status(500).type("text/plain").send("Erro: " + err.message);
   }
 });
 
