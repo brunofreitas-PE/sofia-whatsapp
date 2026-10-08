@@ -2,6 +2,7 @@ require("dotenv").config();
 const express = require("express");
 const webhookRoute = require("./routes/webhook");
 const scheduler = require("./lib/scheduler");
+const { registerPhoneNumber } = require("./lib/whatsapp");
 
 const app = express();
 app.use(express.json());
@@ -75,6 +76,37 @@ app.get("/debug/gerar-sugestao", async (req, res) => {
     console.error("[debug] falha ao gerar sugestão:", err);
     // err.response?.data traz o detalhe de verdade quando o erro vem de uma API
     // externa (Meta ou Anthropic) — err.message sozinho só diz o código HTTP.
+    const detalhe = err.response?.data
+      ? JSON.stringify(err.response.data, null, 2)
+      : err.message;
+    res.status(500).type("text/plain").send("Erro: " + detalhe);
+  }
+});
+
+// Rota temporária pra "registrar" o número configurado em WHATSAPP_PHONE_NUMBER_ID na
+// Cloud API — necessário quando um número aparece como "Pendente" no WhatsApp Manager
+// depois de adicionado/verificado (ver lib/whatsapp.js, registerPhoneNumber). Use uma
+// vez por número (depois de atualizar WHATSAPP_PHONE_NUMBER_ID no Railway pro número
+// novo). `pin` = 6 dígitos à sua escolha (ex: ?token=...&pin=123456) — vira o PIN de
+// verificação em duas etapas desse número, guarde ele.
+app.get("/debug/registrar-numero", async (req, res) => {
+  if (req.query.token !== process.env.WHATSAPP_VERIFY_TOKEN) {
+    return res.sendStatus(403);
+  }
+  const pin = req.query.pin;
+  if (!pin || !/^\d{6}$/.test(pin)) {
+    return res
+      .status(400)
+      .type("text/plain")
+      .send("Erro: passe ?pin=XXXXXX com 6 dígitos na URL.");
+  }
+  try {
+    const resp = await registerPhoneNumber(pin);
+    res
+      .type("text/plain")
+      .send("Registrado com sucesso! Confira no WhatsApp Manager se virou \"Conectado\".\n\n" + JSON.stringify(resp.data, null, 2));
+  } catch (err) {
+    console.error("[debug] falha ao registrar número:", err);
     const detalhe = err.response?.data
       ? JSON.stringify(err.response.data, null, 2)
       : err.message;
