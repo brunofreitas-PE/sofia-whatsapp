@@ -52,6 +52,18 @@ async function sendTemplate(to, templateName, languageCode, bodyParams) {
   });
 }
 
+// Registra o número configurado em WHATSAPP_PHONE_NUMBER_ID na Cloud API — passo
+// necessário depois de adicionar/verificar um número novo no WhatsApp Manager (ele
+// fica "Pendente" até isso rodar; a Meta não faz esse passo sozinha pela tela, só via
+// API). `pin` é um código de 6 dígitos (qualquer um, à sua escolha) pra verificação em
+// duas etapas desse número — guarde ele, pode ser pedido de novo no futuro (ex: se
+// precisar re-registrar o número por algum motivo). Ver /debug/registrar-numero em
+// server/index.js pra como isso é chamado.
+async function registerPhoneNumber(pin) {
+  const api = client();
+  return api.post("/register", { messaging_product: "whatsapp", pin });
+}
+
 // Envia uma imagem já hospedada numa URL pública. Não é o caminho usado hoje (ver
 // uploadMedia abaixo), mas fica disponível caso um dia a gente hospede as imagens
 // em algum lugar em vez de fazer upload direto.
@@ -105,4 +117,11 @@ async function sendImageByMediaId(to, mediaId, caption) {
   });
 }
 
-module.exports = { sendText, sendTemplate, sendImageByUrl, uploadMedia, sendImageByMediaId };
+module.exports = {
+  sendText,
+  sendTemplate,
+  sendImageByUrl,
+  uploadMedia,
+  sendImageByMediaId,
+  registerPhoneNumber,
+};
