@@ -64,7 +64,13 @@ async function generateSuggestion({ calendarItem }) {
   const api = client();
   const msg = await api.messages.create({
     model: "claude-sonnet-4-5",
-    max_tokens: 3000,
+    // Pra carrossel (4-6 slides, cada um com headline/body/footer/imagePrompt em
+    // inglês bem detalhado/imagePromptPt) + a "mensagem" completa (legenda, hashtags,
+    // seção de imagens), o JSON de resposta pode passar fácil de 3000 tokens — quando
+    // isso acontece, a resposta é cortada NO MEIO do JSON e dá erro de parse (ex:
+    // "Expected ',' or '}' after property value in JSON at position X"), sem nenhuma
+    // explicação clara do motivo real. Subido pra 6000 com folga, pra não repetir isso.
+    max_tokens: 6000,
     system: SYSTEM_PROMPT,
     messages: [
       {
@@ -97,7 +103,19 @@ Regras:
   });
   const raw = msg.content[0].text.trim();
   const cleaned = raw.replace(/^```(json)?/i, "").replace(/```$/, "").trim();
-  const parsed = JSON.parse(cleaned); // deixa propagar o erro se vier mal formado — quem chama decide o que fazer
+  let parsed;
+  try {
+    parsed = JSON.parse(cleaned);
+  } catch (err) {
+    // Loga o motivo (truncamento é o mais comum — ver stop_reason) e uma amostra do
+    // fim da resposta, que é onde um corte no meio do JSON costuma acontecer. Sem
+    // isso, só sobra a mensagem genérica do JSON.parse, sem pista nenhuma da causa.
+    console.error(
+      `[claude] generateSuggestion: JSON inválido (stop_reason=${msg.stop_reason}, ` +
+        `${cleaned.length} caracteres). Fim da resposta: ...${cleaned.slice(-300)}`
+    );
+    throw err;
+  }
   if (typeof parsed.mensagem !== "string" || !Array.isArray(parsed.slides)) {
     throw new Error(
       "generateSuggestion: resposta não trouxe o formato esperado ({mensagem, slides})"
