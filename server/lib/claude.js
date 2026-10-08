@@ -54,6 +54,46 @@ const CAMPOS_IMAGEM_IA = `
   - Capriche nos detalhes sensoriais (luz, profundidade de campo, textura) pra imagem sair elaborada — sem exagerar a ponto de ficar artificial ou carregada.
 - Inclua também um campo "imagePromptPt": a MESMA cena descrita em "imagePrompt", só que em português e resumida numa frase curta e natural — isso vai aparecer pro Bruno na mensagem como prévia, então tem que descrever exatamente a mesma cena (só traduzida/resumida), nunca uma cena diferente da que vai ser gerada de verdade.`;
 
+// Schema da sugestão do dia, usado via "tool use" da Anthropic (ver generateSuggestion
+// abaixo) em vez de pedir pro modelo escrever o JSON como texto solto e tentar dar
+// JSON.parse nele. Antes disso, de vez em quando a resposta vinha com um JSON mal
+// formado (ex: uma aspa dentro de uma frase sem escapar direito) e quebrava o
+// JSON.parse com um erro tipo "Expected ',' or '}' after property value" — sem
+// relação com corte por limite de tokens (isso também foi corrigido, à parte, subindo
+// o max_tokens). Com "tool use", é a própria API da Anthropic que garante um JSON
+// válido batendo com esse formato — elimina essa categoria inteira de erro.
+const SUGESTAO_SCHEMA = {
+  name: "entregar_sugestao",
+  description: "Entrega a sugestão de post do dia, pronta pro Bruno aprovar.",
+  input_schema: {
+    type: "object",
+    properties: {
+      mensagem: {
+        type: "string",
+        description:
+          "O texto completo que o Bruno vai receber no WhatsApp: legenda, hashtags, e pra reel/story o roteiro, cenas, textos de tela e sugestão de trilha — o pacote completo, como sempre.",
+      },
+      slides: {
+        type: "array",
+        description:
+          'Vazio ([]) se o formato for "reel" ou "story" (não geram imagem por IA). Exatamente 1 item se "post simples". Entre 4 e 6 itens se "carrossel" (capa, pontos principais, CTA final).',
+        items: {
+          type: "object",
+          properties: {
+            headline: { type: "string", description: "Texto principal/destaque do slide, curto (até uns 60 caracteres)." },
+            body: { type: "string", description: "Texto de apoio, até uns 200 caracteres — pode ficar vazio na capa se não precisar." },
+            footer: { type: "string", description: "Linha pequena opcional (ex: contato/CTA leve) — vazio na maioria dos slides, use só no último." },
+            imagePrompt: { type: "string", description: "Em inglês — ver instruções detalhadas no prompt." },
+            imagePromptPt: { type: "string", description: "A mesma cena de imagePrompt, em português, resumida numa frase curta." },
+          },
+          required: ["headline", "body", "footer", "imagePrompt", "imagePromptPt"],
+        },
+      },
+    },
+    required: ["mensagem", "slides"],
+  },
+};
+
 // Gera a sugestão do dia: o texto completo pro WhatsApp (legenda, hashtags, roteiro
 // se for reel/story) E, no mesmo call, a estrutura de slides + imagePrompt de cada
 // imagem — tudo isso numa resposta só, pra garantir que a prévia que o Bruno lê
@@ -66,56 +106,38 @@ async function generateSuggestion({ calendarItem }) {
     model: "claude-sonnet-4-5",
     // Pra carrossel (4-6 slides, cada um com headline/body/footer/imagePrompt em
     // inglês bem detalhado/imagePromptPt) + a "mensagem" completa (legenda, hashtags,
-    // seção de imagens), o JSON de resposta pode passar fácil de 3000 tokens — quando
-    // isso acontece, a resposta é cortada NO MEIO do JSON e dá erro de parse (ex:
-    // "Expected ',' or '}' after property value in JSON at position X"), sem nenhuma
-    // explicação clara do motivo real. Subido pra 6000 com folga, pra não repetir isso.
+    // seção de imagens), a resposta pode passar fácil de 3000 tokens — e se cortar no
+    // meio o stop_reason vira "max_tokens" com conteúdo incompleto. Subido pra 6000
+    // com folga, pra não repetir isso.
     max_tokens: 6000,
     system: SYSTEM_PROMPT,
+    tools: [SUGESTAO_SCHEMA],
+    tool_choice: { type: "tool", name: SUGESTAO_SCHEMA.name },
     messages: [
       {
         role: "user",
         content: `Gere a sugestão de post de hoje com base neste item do calendário: ${JSON.stringify(
           calendarItem
-        )}
+        )}${CAMPOS_IMAGEM_IA}
 
-Responda APENAS com um JSON válido, sem nenhum texto antes ou depois, neste formato exato:
-{"mensagem":"...","slides":[{"headline":"...","body":"...","footer":"...","imagePrompt":"...","imagePromptPt":"..."}]}
-
-Regras:
-- "mensagem" = o texto completo que o Bruno vai receber no WhatsApp: legenda, hashtags, e pra reel/story o roteiro, cenas, textos de tela e sugestão de trilha — o pacote completo, como sempre.
-- Se o formato for "reel" ou "story", "slides" deve ser um array vazio ([]) — esses formatos não geram imagem por IA (o Bruno grava com o celular).
-- Se o formato for "post simples", gere exatamente 1 slide em "slides".
-- Se o formato for "carrossel", gere entre 4 e 6 slides em "slides" (capa, pontos principais, CTA final).
-- "headline" = texto principal/destaque do slide, curto (até uns 60 caracteres).
-- "body" = texto de apoio, até uns 200 caracteres — pode ficar vazio na capa se não precisar.
-- "footer" = linha pequena opcional (ex: contato/CTA leve) — deixe vazio na maioria dos slides, use só no último.${CAMPOS_IMAGEM_IA}
-- Se "slides" não vier vazio, inclua dentro de "mensagem" (perto do final, antes das hashtags) uma seção assim, usando exatamente o "imagePromptPt" de cada slide (só numerado), pra ser a prévia fiel do que vai ser gerado:
+Se "slides" não vier vazio, inclua dentro de "mensagem" (perto do final, antes das hashtags) uma seção assim, usando exatamente o "imagePromptPt" de cada slide (só numerado), pra ser a prévia fiel do que vai ser gerado:
 
 📸 IMAGEM(NS):
 1. <imagePromptPt do slide 1>
 2. <imagePromptPt do slide 2>
 (uma linha por slide)
 
-- Não inclua markdown dentro dos campos (sem **negrito**, sem #), nada fora do JSON.`,
+Não inclua markdown dentro dos campos (sem **negrito**, sem #).`,
       },
     ],
   });
-  const raw = msg.content[0].text.trim();
-  const cleaned = raw.replace(/^```(json)?/i, "").replace(/```$/, "").trim();
-  let parsed;
-  try {
-    parsed = JSON.parse(cleaned);
-  } catch (err) {
-    // Loga o motivo (truncamento é o mais comum — ver stop_reason) e uma amostra do
-    // fim da resposta, que é onde um corte no meio do JSON costuma acontecer. Sem
-    // isso, só sobra a mensagem genérica do JSON.parse, sem pista nenhuma da causa.
-    console.error(
-      `[claude] generateSuggestion: JSON inválido (stop_reason=${msg.stop_reason}, ` +
-        `${cleaned.length} caracteres). Fim da resposta: ...${cleaned.slice(-300)}`
+  const toolUse = msg.content.find((b) => b.type === "tool_use");
+  if (!toolUse) {
+    throw new Error(
+      `generateSuggestion: resposta sem tool_use (stop_reason=${msg.stop_reason})`
     );
-    throw err;
   }
+  const parsed = toolUse.input; // já vem como objeto — a API garante que bate com o schema, sem precisar de JSON.parse
   if (typeof parsed.mensagem !== "string" || !Array.isArray(parsed.slides)) {
     throw new Error(
       "generateSuggestion: resposta não trouxe o formato esperado ({mensagem, slides})"
