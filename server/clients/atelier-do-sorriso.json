@@ -1,0 +1,21 @@
+{
+  "nomeProfissional": "Dr. Bruno Freitas",
+  "nomeClinica": "Atelier do Sorriso",
+  "profissao": "Odontologia",
+  "conselhoProfissional": "CFM",
+  "especialidades": [
+    "Implantes dentários (dente fixo)",
+    "Prótese / Protocolo",
+    "Facetas em resina 3D",
+    "Alinhadores",
+    "Harmonização Facial"
+  ],
+  "tomDeVoz": "misto — institucional/educativo mais técnico, bastidores/engajamento mais leve — usando copywriting persuasivo (gatilhos mentais, storytelling), sem exagerar",
+  "pilares": ["educativo", "prova social", "bastidores/humanização", "institucional/promocional"],
+  "ctaHandle": "@drbrunofreitas.implantes",
+  "ctaWhatsapp": "(81) 9172-0703",
+  "corPrimaria": "#102a43",
+  "corDestaque": "#d64545",
+  "logoFile": "atelier-do-sorriso-logo.png",
+  "diretrizesImagem": "NÃO peça pra mostrar dentes, boca ou procedimentos de forma anatômica/diagnóstica (número de dentes, estrutura interna, close-up técnico) — a IA erra esse tipo de detalhe com frequência. NÃO repita sempre a mesma cena de \"cadeira odontológica vazia num consultório claro com planta no canto\" — isso fica repetitivo entre posts e entre slides do mesmo carrossel. Varie de verdade a cada slide: pode ser um detalhe de mãos (segurando um alinhador transparente, um modelo de prótese, um espelho de mão), uma pessoa sorrindo de forma confiante e à distância segura (sem foco nos dentes), uma textura ou material (cerâmica, resina, luz entrando por uma janela), um momento de bem-estar fora do consultório (harmonização facial pode ser um momento de cuidado/spa, por exemplo), um detalhe arquitetônico ou decorativo diferente do consultório, ou um objeto relacionado ao tema (escova, fio dental, estojo de alinhador)."
+}
