@@ -252,3 +252,9 @@ router.post("/", async (req, res) => {
 });
 
 module.exports = router;
+// Exportada à parte (o router em si é só as rotas do webhook) pra poder ser
+// reaproveitada numa rota de debug em index.js (ver /debug/gerar-imagens-aprovado) —
+// usada quando uma sugestão foi aprovada mas a imagem gerada não bateu com o que foi
+// aprovado (ex: bug corrigido em 09/10, ver claude/sofia-whatsapp-setup.md), pra gerar
+// e mandar as imagens certas manualmente, sem precisar esperar o próximo post do dia.
+module.exports.gerarEEnviarImagens = gerarEEnviarImagens;
