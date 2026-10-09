@@ -146,6 +146,9 @@ Não inclua markdown dentro dos campos (sem **negrito**, sem #).`,
   return { text: parsed.mensagem, slides: parsed.slides };
 }
 
+// Usada só pra confirmação curta quando o Bruno APROVA (ver webhook.js) — nesse
+// caso o conteúdo não muda, então não precisa reconstruir slides, só uma resposta
+// de texto natural. Pra ajuste/rejeição, ver reviseSuggestion abaixo.
 async function interpretFeedback({ suggestion, feedbackText }) {
   const api = client();
   const msg = await api.messages.create({
@@ -155,11 +158,66 @@ async function interpretFeedback({ suggestion, feedbackText }) {
     messages: [
       {
         role: "user",
-        content: `Esta foi a sugestão enviada:\n\n${suggestion}\n\nO Bruno respondeu:\n"${feedbackText}"\n\nSe for aprovação, confirme. Se for pedido de ajuste, gere a versão revisada. Se for rejeição, proponha uma alternativa.`,
+        content: `Esta foi a sugestão enviada:\n\n${suggestion}\n\nO Bruno respondeu:\n"${feedbackText}"\n\nEle aprovou. Confirme de forma curta e natural.`,
       },
     ],
   });
   return msg.content[0].text;
+}
+
+// Gera a sugestão REVISADA (texto completo + slides, no mesmo formato de
+// generateSuggestion) quando o Bruno pede um ajuste OU rejeita e a Sofia precisa
+// propor uma alternativa — chamada por webhook.js nesses dois casos. Usa o mesmo
+// "tool use" forçado de generateSuggestion, pelos mesmos motivos (sem JSON.parse
+// manual, sem risco de aspa mal escapada).
+//
+// CORREÇÃO (09/10/2026): antes disso, um pedido de ajuste ou de "outro assunto"
+// só gerava uma resposta de texto solta (via interpretFeedback), que NUNCA era
+// salva de volta em pendingSuggestion.text/.slides. Se o Bruno aprovasse essa
+// resposta revisada depois, a geração de imagem continuava usando os slides da
+// sugestão ORIGINAL (o tema/conteúdo que ele tinha acabado de recusar ou pedido
+// pra mudar) — foi exatamente o que aconteceu quando ele pediu outro assunto,
+// aprovou o novo, mas as imagens saíram do assunto antigo (não aprovado). Agora
+// cada ajuste/alternativa regenera o pacote inteiro e webhook.js salva o
+// resultado de volta em pendingSuggestion ANTES de qualquer aprovação futura —
+// então o que for aprovado depois é garantidamente o que o Bruno acabou de ver.
+async function reviseSuggestion({ suggestion, calendarItem, feedbackText }) {
+  const api = client();
+  const msg = await api.messages.create({
+    model: "claude-sonnet-4-5",
+    max_tokens: 6000,
+    system: SYSTEM_PROMPT,
+    tools: [SUGESTAO_SCHEMA],
+    tool_choice: { type: "tool", name: SUGESTAO_SCHEMA.name },
+    messages: [
+      {
+        role: "user",
+        content: `Esta foi a sugestão de post enviada pro Bruno:\n\n${suggestion}\n\nItem do calendário original: ${JSON.stringify(
+          calendarItem
+        )}\n\nO Bruno respondeu pedindo uma mudança (ou recusando e esperando uma alternativa):\n"${feedbackText}"\n\nGere a sugestão REVISADA, completa — o pacote inteiro de novo (legenda, hashtags, e os slides com imagePrompt/imagePromptPt de cada imagem), já refletindo o que ele pediu:
+- Se ele pediu outro assunto/tema, troque o tema (sempre dentro das 5 especialidades permitidas) — evite repetir a mesma especialidade da sugestão anterior, já que foi isso que ele não quis.
+- Se pediu um ajuste específico (algo no texto, tom, imagem, formato etc.), aplique só esse ajuste, mantendo o resto o mais parecido possível com a sugestão original.
+- Se rejeitou sem detalhar, proponha uma alternativa diferente dentro das regras da marca.${CAMPOS_IMAGEM_IA}
+
+Se "slides" não vier vazio, inclua dentro de "mensagem" (perto do final, antes das hashtags) a seção "📸 IMAGEM(NS)" do jeito de sempre, numerada, usando exatamente o "imagePromptPt" de cada slide.
+
+Não inclua markdown dentro dos campos (sem **negrito**, sem #).`,
+      },
+    ],
+  });
+  const toolUse = msg.content.find((b) => b.type === "tool_use");
+  if (!toolUse) {
+    throw new Error(
+      `reviseSuggestion: resposta sem tool_use (stop_reason=${msg.stop_reason})`
+    );
+  }
+  const parsed = toolUse.input;
+  if (typeof parsed.mensagem !== "string" || !Array.isArray(parsed.slides)) {
+    throw new Error(
+      "reviseSuggestion: resposta não trouxe o formato esperado ({mensagem, slides})"
+    );
+  }
+  return { text: parsed.mensagem, slides: parsed.slides };
 }
 
 // Classifica a resposta do Bruno numa decisão que o código consegue usar (diferente
@@ -264,6 +322,7 @@ async function classificarConfirmacaoPublicacao(feedbackText) {
 module.exports = {
   generateSuggestion,
   interpretFeedback,
+  reviseSuggestion,
   classifyDecision,
   generateImageSpec,
   classificarConfirmacaoPublicacao,
