@@ -1,280 +1,339 @@
+require("dotenv").config();
 const express = require("express");
-const router = express.Router();
-const { sendText, uploadMedia, sendImageByMediaId } = require("../lib/whatsapp");
-const {
-  interpretFeedback,
-  reviseSuggestion,
-  classifyDecision,
-  generateImageSpec,
-  classificarConfirmacaoPublicacao,
-} = require("../lib/claude");
-const { transcribeAudio } = require("../lib/transcribe");
-const { load, save } = require("../lib/store");
-const { renderSlides } = require("../lib/render");
-const { gerarImagemIA } = require("../lib/imagegen");
-const { porNumeroRemetente } = require("../lib/clients");
+const webhookRoute = require("./routes/webhook");
+const scheduler = require("./lib/scheduler");
+const { registerPhoneNumber } = require("./lib/whatsapp");
+const { generateImageSpec } = require("./lib/claude");
+const store = require("./lib/store");
+const { porSlug, todosOsClientes } = require("./lib/clients");
 
-// Formatos que precisam de imagem pronta depois da aprovação (reel/story ficam só
-// no roteiro + textos de tela, porque o profissional grava com o próprio celular).
-function precisaDeImagem(format) {
-  const f = (format || "").toLowerCase();
-  return f.includes("post simples") || f.includes("carross");
-}
-
-// Gera as imagens da sugestão aprovada e manda pelo WhatsApp, uma por uma. Os
-// slides (com o imagePrompt de cada imagem) já vêm prontos desde a hora em que a
-// sugestão foi gerada (ver generateSuggestion em claude.js e scheduler.js) — assim a
-// imagem gerada aqui é garantidamente a mesma que o profissional já viu descrita na
-// mensagem original, em vez de duas chamadas desconectadas. Só cai no
-// generateImageSpec (fallback) se por algum motivo não tiver slides salvos (ex:
-// sugestão antiga, de antes dessa versão). Toda imagem (capa do post simples, ou
-// cada slide do carrossel) é gerada por IA via OpenAI (server/lib/imagegen.js). Se a
-// chave não estiver configurada, ou a geração de algum slide falhar, esse slide cai
-// de volta pro fluxo padrão (ícone) em vez de travar o post inteiro. `cliente` é
-// necessário mesmo no fallback (generateImageSpec usa o SYSTEM_PROMPT dele) e pro
-// render.js saber as cores/logo certos (ver lib/render.js).
-async function gerarEEnviarImagens({ to, cliente, pendingSuggestion }) {
-  await sendText(to, "Show! Gerando as imagens do post, só um instante... 🎨");
-
-  let slides = pendingSuggestion.slides;
-  if (!Array.isArray(slides) || slides.length === 0) {
-    console.error(
-      "[webhook] sugestão pendente sem slides salvos — usando generateImageSpec como fallback."
+// Helper usado pelas rotas de debug abaixo: resolve QUAL cliente usar. Se vier
+// ?cliente=<slug> na URL, usa esse (e já valida que existe). Se não vier e só
+// existir UM cliente configurado, usa esse (bom pra continuar funcionando com
+// ?token=... só, do jeito que já estava antes do multi-cliente). Se houver mais
+// de um cliente e nenhum slug foi passado, não dá pra adivinhar — pede pra
+// especificar.
+function resolverClienteDaQuery(slugQuery) {
+  if (slugQuery) {
+    return porSlug(slugQuery); // já lança erro claro se o slug não existir
+  }
+  const todos = todosOsClientes();
+  if (todos.length === 1) return todos[0];
+  if (todos.length === 0) {
+    throw new Error(
+      "Nenhum cliente configurado (confira server/clients/*.json e as variáveis OWNER_WHATSAPP_NUMBER__<slug> no Railway)."
     );
-    const spec = await generateImageSpec({
-      cliente,
-      calendarItem: pendingSuggestion.calendarItem,
-      suggestionText: pendingSuggestion.text,
-    });
-    slides = spec.slides;
   }
-
-  const especialidade =
-    pendingSuggestion.calendarItem?.especialidade || pendingSuggestion.calendarItem?.title;
-
-  let imagensIA = null;
-  if (!process.env.OPENAI_API_KEY) {
-    console.error("[webhook] OPENAI_API_KEY não configurada — usando ícone no lugar da IA.");
-  } else {
-    imagensIA = [];
-    for (const slide of slides) {
-      if (!slide.imagePrompt) {
-        imagensIA.push(null);
-        continue;
-      }
-      try {
-        imagensIA.push(await gerarImagemIA(slide.imagePrompt));
-      } catch (err) {
-        console.error("[webhook] falha ao gerar imagem por IA de um slide:", err.message);
-        imagensIA.push(null); // esse slide cai pro padrão (ícone/texto), não trava o post inteiro
-      }
-    }
-  }
-
-  const pngBuffers = await renderSlides(cliente, slides, especialidade, pendingSuggestion.date, imagensIA);
-  for (let i = 0; i < pngBuffers.length; i++) {
-    const mediaId = await uploadMedia(pngBuffers[i]);
-    const isUltima = i === pngBuffers.length - 1;
-    const caption = isUltima ? "Imagem(ns) pronta(s) pra postar! 📲" : undefined;
-    await sendImageByMediaId(to, mediaId, caption);
-  }
+  throw new Error(
+    `Mais de um cliente configurado (${todos
+      .map((c) => c.slug)
+      .join(", ")}) — passe ?cliente=<slug> na URL pra dizer qual.`
+  );
 }
 
-// A Meta chama essa rota UMA VEZ, na hora que você cadastra o webhook no painel,
-// só pra confirmar que o servidor é seu.
-router.get("/", (req, res) => {
-  const mode = req.query["hub.mode"];
-  const token = req.query["hub.verify_token"];
-  const challenge = req.query["hub.challenge"];
+const app = express();
+app.use(express.json());
 
-  if (mode === "subscribe" && token === process.env.WHATSAPP_VERIFY_TOKEN) {
-    return res.status(200).send(challenge);
-  }
-  return res.sendStatus(403);
+app.get("/", (req, res) => {
+  res.send("Sofia está de pé. 👋");
 });
 
-// Toda mensagem que chega no número (texto, áudio, etc.) cai aqui.
-router.post("/", async (req, res) => {
-  // Responde rápido pra Meta não reenviar o webhook por timeout — o processamento
-  // de verdade continua depois, de forma assíncrona.
-  res.sendStatus(200);
+// Política de privacidade exigida pela Meta pra publicar o app do WhatsApp Cloud API.
+// Texto simples porque a Sofia é uma ferramenta interna do Atelier do Sorriso (uso
+// próprio, não coleta dados de terceiros/público em geral).
+app.get("/privacidade", (req, res) => {
+  res.type("html").send(`<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Política de Privacidade — Sofia (Atelier do Sorriso)</title>
+  <style>
+    body { font-family: -apple-system, system-ui, sans-serif; max-width: 680px; margin: 40px auto; padding: 0 20px; line-height: 1.6; color: #222; }
+    h1 { font-size: 1.5rem; }
+    h2 { font-size: 1.1rem; margin-top: 2rem; }
+    footer { margin-top: 3rem; font-size: 0.85rem; color: #666; }
+  </style>
+</head>
+<body>
+  <h1>Política de Privacidade — Sofia</h1>
+  <p>Última atualização: 02 de outubro de 2026.</p>
 
+  <p>A Sofia é uma ferramenta de uso interno do Atelier do Sorriso, usada exclusivamente
+  para gerar sugestões de conteúdo (posts, stories, reels e carrosséis) para as redes
+  sociais da clínica. Ela se comunica apenas com o número de WhatsApp do responsável
+  pela clínica — não é um serviço público nem coleta dados de clientes ou de terceiros.</p>
+
+  <h2>Quais dados são tratados</h2>
+  <p>Mensagens de texto e áudio trocadas entre o responsável da clínica e o número de
+  WhatsApp da Sofia, com o único objetivo de gerar e ajustar sugestões de conteúdo.
+  Áudios são transcritos automaticamente e descartados após a transcrição.</p>
+
+  <h2>Com quem os dados são compartilhados</h2>
+  <p>As mensagens são processadas pela API da Anthropic (geração do texto das sugestões)
+  e enviadas/recebidas através da API do WhatsApp (Meta Cloud API). Nenhum dado é
+  vendido ou compartilhado com outros terceiros.</p>
+
+  <h2>Armazenamento</h2>
+  <p>O histórico de sugestões e respostas fica guardado apenas para o funcionamento da
+  ferramenta (saber o que já foi aprovado, ajustado ou publicado) e não é usado para
+  nenhuma outra finalidade.</p>
+
+  <h2>Contato</h2>
+  <p>Dúvidas sobre esta política podem ser enviadas para
+  <a href="mailto:atelierdosorrisope@gmail.com">atelierdosorrisope@gmail.com</a>.</p>
+
+  <footer>Atelier do Sorriso</footer>
+</body>
+</html>`);
+});
+
+// Rota temporária pra testar a sugestão do dia sem esperar o horário do agendador (8h).
+// Protegida por um token simples na URL (reaproveita o WHATSAPP_VERIFY_TOKEN) — não é
+// segurança de verdade, só evita que alguém aleatório dispare isso. Dá pra remover
+// depois que não precisar mais testar manualmente. Passe ?cliente=<slug> pra testar
+// um cliente específico (necessário assim que houver mais de um cadastrado).
+app.get("/debug/gerar-sugestao", async (req, res) => {
+  if (req.query.token !== process.env.WHATSAPP_VERIFY_TOKEN) {
+    return res.sendStatus(403);
+  }
   try {
-    const entry = req.body?.entry?.[0];
-    const change = entry?.changes?.[0]?.value;
-    const message = change?.messages?.[0];
-
-    if (!message) {
-      // Não é mensagem nova — pode ser um status (enviado/entregue/lido/FALHOU) de
-      // uma mensagem que a própria Sofia mandou (ex: o template das 8h). A Meta manda
-      // isso pra cá, mas antes a gente simplesmente ignorava — por isso uma falha de
-      // entrega do template nunca aparecia em lugar nenhum. Agora loga no Railway
-      // (aba Deployments > View Logs) pra dar pra investigar.
-      const statuses = change?.statuses;
-      if (Array.isArray(statuses)) {
-        for (const s of statuses) {
-          if (s.status === "failed") {
-            console.error(
-              `[webhook] FALHA ao entregar mensagem (id ${s.id}):`,
-              JSON.stringify(s.errors || s, null, 2)
-            );
-          } else {
-            console.log(`[webhook] status da mensagem ${s.id}: ${s.status}`);
-          }
-        }
-      }
-      return;
-    }
-
-    const from = message.from;
-
-    // A Sofia atende vários clientes com o MESMO número de WhatsApp (ver
-    // lib/clients.js) — quem diferencia um cliente do outro é o número PESSOAL de
-    // quem mandou a mensagem, não o número da Sofia (que é sempre o mesmo). Se o
-    // número não bate com nenhum cliente configurado, não é ninguém que a Sofia deva
-    // atender (ex: alguém errou o número, ou um cliente cuja variável de ambiente
-    // OWNER_WHATSAPP_NUMBER__<slug> ainda não foi configurada) — loga e ignora, sem
-    // responder nada (evita a Sofia "conversando" com estranhos).
-    const cliente = porNumeroRemetente(from);
-    if (!cliente) {
-      console.warn(`[webhook] mensagem de um número não reconhecido como cliente: ${from} — ignorando.`);
-      return;
-    }
-
-    let text = null;
-
-    if (message.type === "text") {
-      text = message.text.body;
-    } else if (message.type === "audio") {
-      text = await transcribeAudio(message.audio.id);
-    } else {
-      await sendText(from, "Por enquanto só entendo texto ou áudio 🙂");
-      return;
-    }
-
-    const state = load(cliente.slug);
-    if (!state.pendingSuggestion) {
-      await sendText(from, "Não tem nenhuma sugestão pendente agora.");
-      return;
-    }
-
-    // Às 8h a Sofia manda só um template (ver scheduler.js), porque a janela de
-    // 24h pode estar fechada — a sugestão completa fica guardada, esperando o
-    // Bruno responder qualquer coisa pra reabrir a janela. Essa é exatamente essa
-    // primeira resposta: manda a sugestão de verdade agora, e NÃO trata essa
-    // mensagem como feedback sobre um conteúdo que ele ainda nem viu (por isso
-    // retorna aqui, sem cair no interpretFeedback/classifyDecision abaixo).
-    if (state.pendingSuggestion.textoEnviado === false) {
-      await sendText(from, state.pendingSuggestion.text);
-      state.pendingSuggestion.textoEnviado = true;
-      save(cliente.slug, state);
-      return;
-    }
-
-    // Se o post já foi aprovado antes, a mensagem pode ser só o Bruno avisando que
-    // já publicou (ex: "postei") — isso não é feedback sobre o CONTEÚDO da
-    // sugestão, então não faz sentido passar pelo interpretFeedback/classifyDecision
-    // normal (que ia tentar reinterpretar isso como ajuste/aprovação do texto). Só
-    // atualiza o status e para por aqui; os lembretes das 13h/18h (scheduler.js)
-    // checam esse status pra saber se ainda precisam avisar.
-    if (
-      state.pendingSuggestion.status === "aprovado" ||
-      state.pendingSuggestion.status === "publicado"
-    ) {
-      const jaPublicou = await classificarConfirmacaoPublicacao(text);
-      if (jaPublicou) {
-        state.pendingSuggestion.status = "publicado";
-        save(cliente.slug, state);
-        await sendText(from, "Show, marcado como publicado! ✅");
-        return;
-      }
-    }
-
-    // Classifica ANTES de gerar qualquer resposta de texto — pra decidir qual dos
-    // dois caminhos abaixo seguir (ver motivo no comentário da branch de
-    // ajuste/rejeição logo adiante).
-    const decision = await classifyDecision({
-      suggestion: state.pendingSuggestion.text,
-      feedbackText: text,
-    });
-
-    if (decision === "aprovado") {
-      // Aprovação não muda o conteúdo — só precisa de uma confirmação natural,
-      // não precisa reconstruir texto/slides (ver interpretFeedback em claude.js).
-      const reply = await interpretFeedback({
-        cliente,
-        suggestion: state.pendingSuggestion.text,
-        feedbackText: text,
-      });
-      await sendText(from, reply);
-
-      state.pendingSuggestion.status = "aprovado";
-      state.history.push({ from, text, reply, decision, at: new Date().toISOString() });
-      save(cliente.slug, state); // salva a aprovação já, antes de tentar gerar imagem (que pode falhar)
-
-      // O "reply" acima é só uma confirmação curta — não garante que a legenda/
-      // hashtags de verdade estejam escritas por extenso ali. Pra garantir que o
-      // profissional sempre tenha a copy pronta pra copiar e colar, reenvia aqui o
-      // texto completo (pendingSuggestion.text), sempre junto da aprovação, antes
-      // (ou no lugar, se não precisar de imagem) das imagens.
-      await sendText(from, state.pendingSuggestion.text);
-
-      if (precisaDeImagem(state.pendingSuggestion.format)) {
-        try {
-          await gerarEEnviarImagens({ to: from, cliente, pendingSuggestion: state.pendingSuggestion });
-        } catch (err) {
-          console.error("[webhook] falha ao gerar/enviar imagens:", err.response?.data || err.message);
-          await sendText(
-            from,
-            "Consegui registrar a aprovação, mas tive um problema gerando as imagens agora. Vou deixar anotado o erro — pode tentar de novo em alguns minutos, ou me avisa se continuar falhando."
-          );
-        }
-      }
-      return;
-    }
-
-    // "ajuste" (mudança pedida, incluindo "quero outro assunto") ou "rejeitado"
-    // (Sofia precisa propor uma alternativa): regenera o PACOTE INTEIRO (texto +
-    // slides, com reviseSuggestion em claude.js) refletindo o pedido, e salva esse
-    // resultado de volta em pendingSuggestion ANTES de qualquer aprovação futura.
-    //
-    // Isso corrige um bug real (09/10/2026): antes, esse caminho só gerava uma
-    // resposta de texto solta (interpretFeedback), sem nunca atualizar
-    // pendingSuggestion.text/.slides — então, se o Bruno aprovasse essa resposta
-    // revisada (ex: pediu "outro assunto", gostou do novo, aprovou), a geração de
-    // imagem continuava usando os slides da sugestão ORIGINAL (o assunto que ele
-    // tinha acabado de recusar), porque era isso que ainda estava salvo. Agora,
-    // qualquer ajuste/alternativa já fica salvo como a nova pendingSuggestion, então
-    // uma aprovação posterior sempre bate com o que o Bruno realmente viu por último.
-    try {
-      const revisado = await reviseSuggestion({
-        cliente,
-        suggestion: state.pendingSuggestion.text,
-        calendarItem: state.pendingSuggestion.calendarItem,
-        feedbackText: text,
-      });
-      state.pendingSuggestion.text = revisado.text;
-      state.pendingSuggestion.slides = revisado.slides;
-      state.pendingSuggestion.status = "aguardando";
-      state.history.push({ from, text, reply: revisado.text, decision, at: new Date().toISOString() });
-      save(cliente.slug, state);
-      await sendText(from, revisado.text);
-    } catch (err) {
-      console.error("[webhook] falha ao revisar sugestão:", err.response?.data || err.message);
-      await sendText(
-        from,
-        "Entendi o que você pediu, mas tive um problema gerando a versão revisada agora. Pode tentar de novo em instantes?"
-      );
-    }
+    const cliente = resolverClienteDaQuery(req.query.cliente);
+    const suggestion = await scheduler.runDailySuggestionNow(cliente);
+    res
+      .type("text/plain")
+      .send(`Sugestão gerada e enviada pro cliente "${cliente.slug}"! Confira o WhatsApp.\n\n` + suggestion);
   } catch (err) {
-    console.error("[webhook] erro processando mensagem:", err);
+    console.error("[debug] falha ao gerar sugestão:", err);
+    // err.response?.data traz o detalhe de verdade quando o erro vem de uma API
+    // externa (Meta ou Anthropic) — err.message sozinho só diz o código HTTP.
+    const detalhe = err.response?.data
+      ? JSON.stringify(err.response.data, null, 2)
+      : err.message;
+    res.status(500).type("text/plain").send("Erro: " + detalhe);
   }
 });
 
-module.exports = router;
-// Exportada à parte (o router em si é só as rotas do webhook) pra poder ser
-// reaproveitada numa rota de debug em index.js (ver /debug/gerar-imagens-aprovado) —
-// usada quando uma sugestão foi aprovada mas a imagem gerada não bateu com o que foi
-// aprovado (ex: bug corrigido em 09/10, ver claude/sofia-whatsapp-setup.md), pra gerar
-// e mandar as imagens certas manualmente, sem precisar esperar o próximo post do dia.
-module.exports.gerarEEnviarImagens = gerarEEnviarImagens;
+// Rota temporária pra "registrar" o número configurado em WHATSAPP_PHONE_NUMBER_ID na
+// Cloud API — necessário quando um número aparece como "Pendente" no WhatsApp Manager
+// depois de adicionado/verificado (ver lib/whatsapp.js, registerPhoneNumber). Use uma
+// vez por número (depois de atualizar WHATSAPP_PHONE_NUMBER_ID no Railway pro número
+// novo). `pin` = 6 dígitos à sua escolha (ex: ?token=...&pin=123456) — vira o PIN de
+// verificação em duas etapas desse número, guarde ele.
+app.get("/debug/registrar-numero", async (req, res) => {
+  if (req.query.token !== process.env.WHATSAPP_VERIFY_TOKEN) {
+    return res.sendStatus(403);
+  }
+  const pin = req.query.pin;
+  if (!pin || !/^\d{6}$/.test(pin)) {
+    return res
+      .status(400)
+      .type("text/plain")
+      .send("Erro: passe ?pin=XXXXXX com 6 dígitos na URL.");
+  }
+  try {
+    const resp = await registerPhoneNumber(pin);
+    res
+      .type("text/plain")
+      .send("Registrado com sucesso! Confira no WhatsApp Manager se virou \"Conectado\".\n\n" + JSON.stringify(resp.data, null, 2));
+  } catch (err) {
+    console.error("[debug] falha ao registrar número:", err);
+    const detalhe = err.response?.data
+      ? JSON.stringify(err.response.data, null, 2)
+      : err.message;
+    res.status(500).type("text/plain").send("Erro: " + detalhe);
+  }
+});
+
+// Rota temporária só pra testar se o Railway Volume (DATA_DIR) está persistindo os
+// dados entre deploys — mostra o estado salvo agora (sugestão pendente, histórico) de
+// UM cliente (?cliente=<slug>, ver resolverClienteDaQuery acima). Uso: chamar antes e
+// depois de um redeploy e comparar — se continuar igual depois do redeploy, o volume
+// está funcionando. Pode remover depois de confirmado.
+app.get("/debug/estado", (req, res) => {
+  if (req.query.token !== process.env.WHATSAPP_VERIFY_TOKEN) {
+    return res.sendStatus(403);
+  }
+  try {
+    const cliente = resolverClienteDaQuery(req.query.cliente);
+    const state = store.load(cliente.slug);
+    res.type("text/plain").send(JSON.stringify(state, null, 2));
+  } catch (err) {
+    console.error("[debug] falha ao ler estado:", err);
+    res.status(500).type("text/plain").send("Erro: " + err.message);
+  }
+});
+
+// Rota de resgate: gera e manda as imagens certas a partir de um texto já aprovado
+// de verdade (ex: quando um bug fez a imagem sair de um assunto diferente do que foi
+// aprovado — ver claude/sofia-whatsapp-setup.md, 09/10/2026).
+//
+// GET mostra um formulariozinho (o profissional não tem como fazer um POST colando
+// uma URL na barra de endereço) — ele escolhe o CLIENTE (quando houver mais de um
+// cadastrado), cola o texto aprovado numa caixa, escolhe a especialidade/formato e
+// aperta um botão, que dispara o POST de verdade pro mesmo endereço. A lista de
+// especialidades do dropdown muda sozinha de acordo com o cliente escolhido (cada
+// cliente tem sua própria lista — ver server/clients/<slug>.json). POST espera um
+// corpo JSON { "cliente": "<slug>", "texto": "...", "especialidade": "...",
+// "format": "post simples" | "carrossel" } (especialidade e format são opcionais) e
+// manda pro ownerWhatsappNumber desse cliente.
+app.get("/debug/gerar-imagens-aprovado", (req, res) => {
+  if (req.query.token !== process.env.WHATSAPP_VERIFY_TOKEN) {
+    return res.sendStatus(403);
+  }
+  let clientes;
+  try {
+    clientes = todosOsClientes();
+  } catch (err) {
+    return res.status(500).type("text/plain").send("Erro: " + err.message);
+  }
+  if (clientes.length === 0) {
+    return res
+      .status(500)
+      .type("text/plain")
+      .send(
+        "Nenhum cliente configurado (confira server/clients/*.json e as variáveis OWNER_WHATSAPP_NUMBER__<slug> no Railway)."
+      );
+  }
+
+  const actionUrl = `/debug/gerar-imagens-aprovado?token=${encodeURIComponent(req.query.token)}`;
+  const especialidadesPorCliente = {};
+  clientes.forEach((c) => {
+    especialidadesPorCliente[c.slug] = c.especialidades || [];
+  });
+  const clienteOptions = clientes
+    .map((c) => `<option value="${c.slug}">${c.nomeClinica} (${c.nomeProfissional})</option>`)
+    .join("\n      ");
+
+  res.type("html").send(`<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Gerar imagens do texto aprovado — Sofia</title>
+  <style>
+    body { font-family: -apple-system, system-ui, sans-serif; max-width: 680px; margin: 30px auto; padding: 0 16px; line-height: 1.5; color: #222; }
+    label { display: block; font-weight: 600; margin-top: 16px; margin-bottom: 4px; }
+    textarea, select, button { width: 100%; font-size: 1rem; padding: 10px; box-sizing: border-box; }
+    textarea { min-height: 300px; font-family: inherit; }
+    button { margin-top: 20px; background: #102a43; color: white; border: none; border-radius: 8px; padding: 14px; font-weight: 600; cursor: pointer; }
+    button:disabled { opacity: 0.6; }
+    #status { margin-top: 16px; white-space: pre-wrap; font-size: 0.95rem; }
+  </style>
+</head>
+<body>
+  <h2>Gerar as imagens certas de um texto já aprovado</h2>
+  <p>Escolhe o cliente, cola abaixo o texto COMPLETO que foi aprovado de verdade (legenda + a parte "IMAGEM(NS)" + hashtags, tudo junto), escolhe a especialidade e o formato, e aperta o botão.</p>
+  <form id="f">
+    ${
+      clientes.length > 1
+        ? `<label for="cliente">Cliente</label>
+    <select id="cliente" name="cliente">
+      ${clienteOptions}
+    </select>`
+        : `<input type="hidden" id="cliente" name="cliente" value="${clientes[0].slug}">`
+    }
+
+    <label for="texto">Texto aprovado</label>
+    <textarea id="texto" name="texto" required placeholder="Cole aqui o texto inteiro..."></textarea>
+
+    <label for="especialidade">Especialidade</label>
+    <select id="especialidade" name="especialidade"></select>
+
+    <label for="format">Formato</label>
+    <select id="format" name="format">
+      <option value="post simples">Post simples</option>
+      <option value="carrossel">Carrossel</option>
+    </select>
+
+    <button type="submit" id="btn">Gerar e enviar imagens pelo WhatsApp</button>
+  </form>
+  <div id="status"></div>
+  <script>
+    const ESPECIALIDADES_POR_CLIENTE = ${JSON.stringify(especialidadesPorCliente)};
+    const clienteEl = document.getElementById("cliente");
+    const especialidadeEl = document.getElementById("especialidade");
+
+    function atualizarEspecialidades() {
+      const lista = ESPECIALIDADES_POR_CLIENTE[clienteEl.value] || [];
+      especialidadeEl.innerHTML = lista.map((e) => \`<option value="\${e}">\${e}</option>\`).join("");
+    }
+    if (clienteEl.tagName === "SELECT") {
+      clienteEl.addEventListener("change", atualizarEspecialidades);
+    }
+    atualizarEspecialidades();
+
+    document.getElementById("f").addEventListener("submit", async (ev) => {
+      ev.preventDefault();
+      const btn = document.getElementById("btn");
+      const status = document.getElementById("status");
+      btn.disabled = true;
+      status.textContent = "Gerando... isso pode levar um minuto, não feche essa tela.";
+      try {
+        const resp = await fetch(${JSON.stringify(actionUrl)}, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            cliente: clienteEl.value,
+            texto: document.getElementById("texto").value,
+            especialidade: especialidadeEl.value,
+            format: document.getElementById("format").value,
+          }),
+        });
+        const text = await resp.text();
+        status.textContent = (resp.ok ? "✅ " : "❌ ") + text;
+      } catch (err) {
+        status.textContent = "❌ Erro: " + err.message;
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>`);
+});
+
+app.post("/debug/gerar-imagens-aprovado", async (req, res) => {
+  if (req.query.token !== process.env.WHATSAPP_VERIFY_TOKEN) {
+    return res.sendStatus(403);
+  }
+  const { texto, especialidade, format, cliente: clienteSlug } = req.body || {};
+  if (!texto || typeof texto !== "string") {
+    return res
+      .status(400)
+      .type("text/plain")
+      .send('Erro: passe um corpo JSON com {"texto": "..."} (o texto completo que foi aprovado).');
+  }
+  try {
+    const cliente = resolverClienteDaQuery(clienteSlug);
+    const calendarItem = {
+      especialidade: especialidade || null,
+      format: format || "post simples",
+      title: "gerado manualmente via /debug/gerar-imagens-aprovado",
+    };
+    const spec = await generateImageSpec({ cliente, calendarItem, suggestionText: texto });
+    await webhookRoute.gerarEEnviarImagens({
+      to: cliente.ownerWhatsappNumber,
+      cliente,
+      pendingSuggestion: {
+        slides: spec.slides,
+        format: calendarItem.format,
+        calendarItem,
+        date: new Date().toISOString().slice(0, 10),
+      },
+    });
+    res.type("text/plain").send(`Imagens geradas e enviadas pro cliente "${cliente.slug}"! Confira o WhatsApp.`);
+  } catch (err) {
+    console.error("[debug] falha ao gerar imagens manualmente:", err);
+    const detalhe = err.response?.data ? JSON.stringify(err.response.data, null, 2) : err.message;
+    res.status(500).type("text/plain").send("Erro: " + detalhe);
+  }
+});
+
+app.use("/webhook", webhookRoute);
+
+const port = process.env.PORT || 3000;
+app.listen(port, () => {
+  console.log(`[sofia] servidor rodando na porta ${port}`);
+  scheduler.start();
+});
