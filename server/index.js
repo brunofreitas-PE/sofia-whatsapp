@@ -135,9 +135,90 @@ app.get("/debug/estado", (req, res) => {
 
 // Rota de resgate: gera e manda as imagens certas a partir de um texto já aprovado
 // de verdade (ex: quando um bug fez a imagem sair de um assunto diferente do que foi
-// aprovado — ver claude/sofia-whatsapp-setup.md, 09/10/2026). Espera um corpo JSON
-// { "texto": "...", "especialidade": "...", "format": "post simples" | "carrossel" }
-// (especialidade e format são opcionais). Manda pro OWNER_WHATSAPP_NUMBER de sempre.
+// aprovado — ver claude/sofia-whatsapp-setup.md, 09/10/2026).
+//
+// GET mostra um formulariozinho (o Bruno não tem como fazer um POST colando uma URL
+// na barra de endereço) — ele cola o texto aprovado numa caixa, escolhe a
+// especialidade/formato e aperta um botão, que dispara o POST de verdade pro mesmo
+// endereço. POST espera um corpo JSON { "texto": "...", "especialidade": "...",
+// "format": "post simples" | "carrossel" } (especialidade e format são opcionais) e
+// manda pro OWNER_WHATSAPP_NUMBER de sempre.
+app.get("/debug/gerar-imagens-aprovado", (req, res) => {
+  if (req.query.token !== process.env.WHATSAPP_VERIFY_TOKEN) {
+    return res.sendStatus(403);
+  }
+  const actionUrl = `/debug/gerar-imagens-aprovado?token=${encodeURIComponent(req.query.token)}`;
+  res.type("html").send(`<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Gerar imagens do texto aprovado — Sofia</title>
+  <style>
+    body { font-family: -apple-system, system-ui, sans-serif; max-width: 680px; margin: 30px auto; padding: 0 16px; line-height: 1.5; color: #222; }
+    label { display: block; font-weight: 600; margin-top: 16px; margin-bottom: 4px; }
+    textarea, select, button { width: 100%; font-size: 1rem; padding: 10px; box-sizing: border-box; }
+    textarea { min-height: 300px; font-family: inherit; }
+    button { margin-top: 20px; background: #102a43; color: white; border: none; border-radius: 8px; padding: 14px; font-weight: 600; cursor: pointer; }
+    button:disabled { opacity: 0.6; }
+    #status { margin-top: 16px; white-space: pre-wrap; font-size: 0.95rem; }
+  </style>
+</head>
+<body>
+  <h2>Gerar as imagens certas de um texto já aprovado</h2>
+  <p>Cola abaixo o texto COMPLETO que você aprovou de verdade (legenda + a parte "IMAGEM(NS)" + hashtags, tudo junto). Depois escolhe a especialidade e o formato, e aperta o botão.</p>
+  <form id="f">
+    <label for="texto">Texto aprovado</label>
+    <textarea id="texto" name="texto" required placeholder="Cole aqui o texto inteiro..."></textarea>
+
+    <label for="especialidade">Especialidade</label>
+    <select id="especialidade" name="especialidade">
+      <option value="Implantes dentários (dente fixo)">Implantes dentários (dente fixo)</option>
+      <option value="Prótese / Protocolo">Prótese / Protocolo</option>
+      <option value="Facetas em resina 3D">Facetas em resina 3D</option>
+      <option value="Alinhadores">Alinhadores</option>
+      <option value="Harmonização Facial">Harmonização Facial</option>
+    </select>
+
+    <label for="format">Formato</label>
+    <select id="format" name="format">
+      <option value="post simples">Post simples</option>
+      <option value="carrossel">Carrossel</option>
+    </select>
+
+    <button type="submit" id="btn">Gerar e enviar imagens pelo WhatsApp</button>
+  </form>
+  <div id="status"></div>
+  <script>
+    document.getElementById("f").addEventListener("submit", async (ev) => {
+      ev.preventDefault();
+      const btn = document.getElementById("btn");
+      const status = document.getElementById("status");
+      btn.disabled = true;
+      status.textContent = "Gerando... isso pode levar um minuto, não feche essa tela.";
+      try {
+        const resp = await fetch(${JSON.stringify(actionUrl)}, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            texto: document.getElementById("texto").value,
+            especialidade: document.getElementById("especialidade").value,
+            format: document.getElementById("format").value,
+          }),
+        });
+        const text = await resp.text();
+        status.textContent = (resp.ok ? "✅ " : "❌ ") + text;
+      } catch (err) {
+        status.textContent = "❌ Erro: " + err.message;
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>`);
+});
+
 app.post("/debug/gerar-imagens-aprovado", async (req, res) => {
   if (req.query.token !== process.env.WHATSAPP_VERIFY_TOKEN) {
     return res.sendStatus(403);
