@@ -3,6 +3,7 @@ const router = express.Router();
 const { sendText, uploadMedia, sendImageByMediaId } = require("../lib/whatsapp");
 const {
   interpretFeedback,
+  reviseSuggestion,
   classifyDecision,
   generateImageSpec,
   classificarConfirmacaoPublicacao,
@@ -171,31 +172,32 @@ router.post("/", async (req, res) => {
       }
     }
 
-    const reply = await interpretFeedback({
-      suggestion: state.pendingSuggestion.text,
-      feedbackText: text,
-    });
-    await sendText(from, reply);
-
+    // Classifica ANTES de gerar qualquer resposta de texto — pra decidir qual dos
+    // dois caminhos abaixo seguir (ver motivo no comentário da branch de
+    // ajuste/rejeição logo adiante).
     const decision = await classifyDecision({
       suggestion: state.pendingSuggestion.text,
       feedbackText: text,
     });
 
-    state.history.push({ from, text, reply, decision, at: new Date().toISOString() });
-
     if (decision === "aprovado") {
+      // Aprovação não muda o conteúdo — só precisa de uma confirmação natural,
+      // não precisa reconstruir texto/slides (ver interpretFeedback em claude.js).
+      const reply = await interpretFeedback({
+        suggestion: state.pendingSuggestion.text,
+        feedbackText: text,
+      });
+      await sendText(from, reply);
+
       state.pendingSuggestion.status = "aprovado";
+      state.history.push({ from, text, reply, decision, at: new Date().toISOString() });
       save(state); // salva a aprovação já, antes de tentar gerar imagem (que pode falhar)
 
-      // O "reply" do interpretFeedback acima é só uma confirmação curta (ex: resumo do
-      // post) — ele NÃO garante que a legenda/hashtags de verdade estejam escritas por
-      // extenso ali (às vezes só descreve o que a legenda deve conter, em vez de
-      // reproduzir o texto). Pra garantir que o Bruno sempre tenha a copy pronta pra
-      // copiar e colar — mesmo que ele já tenha recebido isso antes, lá no início da
-      // conversa —, reenvia aqui o texto completo original (pendingSuggestion.text),
-      // sempre junto da aprovação, antes (ou no lugar, se não precisar de imagem) das
-      // imagens.
+      // O "reply" acima é só uma confirmação curta — não garante que a legenda/
+      // hashtags de verdade estejam escritas por extenso ali. Pra garantir que o
+      // Bruno sempre tenha a copy pronta pra copiar e colar, reenvia aqui o texto
+      // completo (pendingSuggestion.text), sempre junto da aprovação, antes (ou no
+      // lugar, se não precisar de imagem) das imagens.
       await sendText(from, state.pendingSuggestion.text);
 
       if (precisaDeImagem(state.pendingSuggestion.format)) {
@@ -210,11 +212,40 @@ router.post("/", async (req, res) => {
         }
       }
       return;
-    } else if (decision === "rejeitado") {
-      state.pendingSuggestion.status = "rejeitado";
     }
 
-    save(state);
+    // "ajuste" (mudança pedida, incluindo "quero outro assunto") ou "rejeitado"
+    // (Sofia precisa propor uma alternativa): regenera o PACOTE INTEIRO (texto +
+    // slides, com reviseSuggestion em claude.js) refletindo o pedido, e salva esse
+    // resultado de volta em pendingSuggestion ANTES de qualquer aprovação futura.
+    //
+    // Isso corrige um bug real (09/10/2026): antes, esse caminho só gerava uma
+    // resposta de texto solta (interpretFeedback), sem nunca atualizar
+    // pendingSuggestion.text/.slides — então, se o Bruno aprovasse essa resposta
+    // revisada (ex: pediu "outro assunto", gostou do novo, aprovou), a geração de
+    // imagem continuava usando os slides da sugestão ORIGINAL (o assunto que ele
+    // tinha acabado de recusar), porque era isso que ainda estava salvo. Agora,
+    // qualquer ajuste/alternativa já fica salvo como a nova pendingSuggestion, então
+    // uma aprovação posterior sempre bate com o que o Bruno realmente viu por último.
+    try {
+      const revisado = await reviseSuggestion({
+        suggestion: state.pendingSuggestion.text,
+        calendarItem: state.pendingSuggestion.calendarItem,
+        feedbackText: text,
+      });
+      state.pendingSuggestion.text = revisado.text;
+      state.pendingSuggestion.slides = revisado.slides;
+      state.pendingSuggestion.status = "aguardando";
+      state.history.push({ from, text, reply: revisado.text, decision, at: new Date().toISOString() });
+      save(state);
+      await sendText(from, revisado.text);
+    } catch (err) {
+      console.error("[webhook] falha ao revisar sugestão:", err.response?.data || err.message);
+      await sendText(
+        from,
+        "Entendi o que você pediu, mas tive um problema gerando a versão revisada agora. Pode tentar de novo em instantes?"
+      );
+    }
   } catch (err) {
     console.error("[webhook] erro processando mensagem:", err);
   }
