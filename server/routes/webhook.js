@@ -12,9 +12,10 @@ const { transcribeAudio } = require("../lib/transcribe");
 const { load, save } = require("../lib/store");
 const { renderSlides } = require("../lib/render");
 const { gerarImagemIA } = require("../lib/imagegen");
+const { porNumeroRemetente } = require("../lib/clients");
 
 // Formatos que precisam de imagem pronta depois da aprovação (reel/story ficam só
-// no roteiro + textos de tela, porque o Bruno grava com o próprio celular).
+// no roteiro + textos de tela, porque o profissional grava com o próprio celular).
 function precisaDeImagem(format) {
   const f = (format || "").toLowerCase();
   return f.includes("post simples") || f.includes("carross");
@@ -23,14 +24,16 @@ function precisaDeImagem(format) {
 // Gera as imagens da sugestão aprovada e manda pelo WhatsApp, uma por uma. Os
 // slides (com o imagePrompt de cada imagem) já vêm prontos desde a hora em que a
 // sugestão foi gerada (ver generateSuggestion em claude.js e scheduler.js) — assim a
-// imagem gerada aqui é garantidamente a mesma que o Bruno já viu descrita na
+// imagem gerada aqui é garantidamente a mesma que o profissional já viu descrita na
 // mensagem original, em vez de duas chamadas desconectadas. Só cai no
 // generateImageSpec (fallback) se por algum motivo não tiver slides salvos (ex:
 // sugestão antiga, de antes dessa versão). Toda imagem (capa do post simples, ou
 // cada slide do carrossel) é gerada por IA via OpenAI (server/lib/imagegen.js). Se a
 // chave não estiver configurada, ou a geração de algum slide falhar, esse slide cai
-// de volta pro fluxo padrão (foto de banco/ícone) em vez de travar o post inteiro.
-async function gerarEEnviarImagens({ to, pendingSuggestion }) {
+// de volta pro fluxo padrão (ícone) em vez de travar o post inteiro. `cliente` é
+// necessário mesmo no fallback (generateImageSpec usa o SYSTEM_PROMPT dele) e pro
+// render.js saber as cores/logo certos (ver lib/render.js).
+async function gerarEEnviarImagens({ to, cliente, pendingSuggestion }) {
   await sendText(to, "Show! Gerando as imagens do post, só um instante... 🎨");
 
   let slides = pendingSuggestion.slides;
@@ -39,6 +42,7 @@ async function gerarEEnviarImagens({ to, pendingSuggestion }) {
       "[webhook] sugestão pendente sem slides salvos — usando generateImageSpec como fallback."
     );
     const spec = await generateImageSpec({
+      cliente,
       calendarItem: pendingSuggestion.calendarItem,
       suggestionText: pendingSuggestion.text,
     });
@@ -50,7 +54,7 @@ async function gerarEEnviarImagens({ to, pendingSuggestion }) {
 
   let imagensIA = null;
   if (!process.env.OPENAI_API_KEY) {
-    console.error("[webhook] OPENAI_API_KEY não configurada — usando foto de banco/ícone no lugar da IA.");
+    console.error("[webhook] OPENAI_API_KEY não configurada — usando ícone no lugar da IA.");
   } else {
     imagensIA = [];
     for (const slide of slides) {
@@ -62,12 +66,12 @@ async function gerarEEnviarImagens({ to, pendingSuggestion }) {
         imagensIA.push(await gerarImagemIA(slide.imagePrompt));
       } catch (err) {
         console.error("[webhook] falha ao gerar imagem por IA de um slide:", err.message);
-        imagensIA.push(null); // esse slide cai pro padrão (foto de banco/texto), não trava o post inteiro
+        imagensIA.push(null); // esse slide cai pro padrão (ícone/texto), não trava o post inteiro
       }
     }
   }
 
-  const pngBuffers = await renderSlides(slides, especialidade, pendingSuggestion.date, imagensIA);
+  const pngBuffers = await renderSlides(cliente, slides, especialidade, pendingSuggestion.date, imagensIA);
   for (let i = 0; i < pngBuffers.length; i++) {
     const mediaId = await uploadMedia(pngBuffers[i]);
     const isUltima = i === pngBuffers.length - 1;
@@ -123,6 +127,20 @@ router.post("/", async (req, res) => {
     }
 
     const from = message.from;
+
+    // A Sofia atende vários clientes com o MESMO número de WhatsApp (ver
+    // lib/clients.js) — quem diferencia um cliente do outro é o número PESSOAL de
+    // quem mandou a mensagem, não o número da Sofia (que é sempre o mesmo). Se o
+    // número não bate com nenhum cliente configurado, não é ninguém que a Sofia deva
+    // atender (ex: alguém errou o número, ou um cliente cuja variável de ambiente
+    // OWNER_WHATSAPP_NUMBER__<slug> ainda não foi configurada) — loga e ignora, sem
+    // responder nada (evita a Sofia "conversando" com estranhos).
+    const cliente = porNumeroRemetente(from);
+    if (!cliente) {
+      console.warn(`[webhook] mensagem de um número não reconhecido como cliente: ${from} — ignorando.`);
+      return;
+    }
+
     let text = null;
 
     if (message.type === "text") {
@@ -134,7 +152,7 @@ router.post("/", async (req, res) => {
       return;
     }
 
-    const state = load();
+    const state = load(cliente.slug);
     if (!state.pendingSuggestion) {
       await sendText(from, "Não tem nenhuma sugestão pendente agora.");
       return;
@@ -149,7 +167,7 @@ router.post("/", async (req, res) => {
     if (state.pendingSuggestion.textoEnviado === false) {
       await sendText(from, state.pendingSuggestion.text);
       state.pendingSuggestion.textoEnviado = true;
-      save(state);
+      save(cliente.slug, state);
       return;
     }
 
@@ -166,7 +184,7 @@ router.post("/", async (req, res) => {
       const jaPublicou = await classificarConfirmacaoPublicacao(text);
       if (jaPublicou) {
         state.pendingSuggestion.status = "publicado";
-        save(state);
+        save(cliente.slug, state);
         await sendText(from, "Show, marcado como publicado! ✅");
         return;
       }
@@ -184,6 +202,7 @@ router.post("/", async (req, res) => {
       // Aprovação não muda o conteúdo — só precisa de uma confirmação natural,
       // não precisa reconstruir texto/slides (ver interpretFeedback em claude.js).
       const reply = await interpretFeedback({
+        cliente,
         suggestion: state.pendingSuggestion.text,
         feedbackText: text,
       });
@@ -191,18 +210,18 @@ router.post("/", async (req, res) => {
 
       state.pendingSuggestion.status = "aprovado";
       state.history.push({ from, text, reply, decision, at: new Date().toISOString() });
-      save(state); // salva a aprovação já, antes de tentar gerar imagem (que pode falhar)
+      save(cliente.slug, state); // salva a aprovação já, antes de tentar gerar imagem (que pode falhar)
 
       // O "reply" acima é só uma confirmação curta — não garante que a legenda/
       // hashtags de verdade estejam escritas por extenso ali. Pra garantir que o
-      // Bruno sempre tenha a copy pronta pra copiar e colar, reenvia aqui o texto
-      // completo (pendingSuggestion.text), sempre junto da aprovação, antes (ou no
-      // lugar, se não precisar de imagem) das imagens.
+      // profissional sempre tenha a copy pronta pra copiar e colar, reenvia aqui o
+      // texto completo (pendingSuggestion.text), sempre junto da aprovação, antes
+      // (ou no lugar, se não precisar de imagem) das imagens.
       await sendText(from, state.pendingSuggestion.text);
 
       if (precisaDeImagem(state.pendingSuggestion.format)) {
         try {
-          await gerarEEnviarImagens({ to: from, pendingSuggestion: state.pendingSuggestion });
+          await gerarEEnviarImagens({ to: from, cliente, pendingSuggestion: state.pendingSuggestion });
         } catch (err) {
           console.error("[webhook] falha ao gerar/enviar imagens:", err.response?.data || err.message);
           await sendText(
@@ -229,6 +248,7 @@ router.post("/", async (req, res) => {
     // uma aprovação posterior sempre bate com o que o Bruno realmente viu por último.
     try {
       const revisado = await reviseSuggestion({
+        cliente,
         suggestion: state.pendingSuggestion.text,
         calendarItem: state.pendingSuggestion.calendarItem,
         feedbackText: text,
@@ -237,7 +257,7 @@ router.post("/", async (req, res) => {
       state.pendingSuggestion.slides = revisado.slides;
       state.pendingSuggestion.status = "aguardando";
       state.history.push({ from, text, reply: revisado.text, decision, at: new Date().toISOString() });
-      save(state);
+      save(cliente.slug, state);
       await sendText(from, revisado.text);
     } catch (err) {
       console.error("[webhook] falha ao revisar sugestão:", err.response?.data || err.message);
