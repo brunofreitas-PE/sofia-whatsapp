@@ -14,9 +14,13 @@
 // Estilo "ícone preenchido": as silhuetas principais (dente, rosto) ficam
 // preenchidas sólidas, não só contornadas — fica com mais peso visual/mais rico.
 // Detalhes desenhados POR CIMA de uma silhueta preenchida (brilho, sorriso,
-// estrelinha) usam CONTRAST (a cor de fundo do card) em vez da cor do ícone,
-// senão ficariam brancos sobre branco e desapareceriam.
-const CONTRAST = "#102a43"; // igual ao NAVY de server/lib/render.js
+// estrelinha) usam a cor de CONTRASTE (a cor de fundo do card) em vez da cor do
+// ícone, senão ficariam brancos sobre branco e desapareceriam. Essa cor é
+// client-specific agora (cada cliente tem sua própria corPrimaria — ver
+// lib/clients.js e lib/render.js) — por isso é passada como parâmetro
+// (`contrast`) em vez de uma constante fixa; o valor abaixo é só o padrão de
+// segurança, caso alguma chamada antiga não passe nada.
+const CONTRAST_PADRAO = "#102a43";
 
 function tooth(ctx, { rootsVisible = true } = {}) {
   // Coroa (parte de cima, arredondada) + duas raízes (parte de baixo, pontudas).
@@ -139,7 +143,7 @@ function sparkle(ctx, x, y, s) {
   ctx.stroke();
 }
 
-function facetasV0(ctx) {
+function facetasV0(ctx, contrast = CONTRAST_PADRAO) {
   ctx.save();
   ctx.translate(0, -2);
   tooth(ctx);
@@ -147,7 +151,7 @@ function facetasV0(ctx) {
   // "brilho" diagonal sobre o dente preenchido — precisa da cor de contraste,
   // senão fica branco sobre branco e some.
   ctx.save();
-  ctx.strokeStyle = CONTRAST;
+  ctx.strokeStyle = contrast;
   ctx.beginPath();
   ctx.moveTo(-8, -24);
   ctx.lineTo(-2, -4);
@@ -156,7 +160,7 @@ function facetasV0(ctx) {
   sparkle(ctx, 20, -22, 7);
 }
 
-function facetasV1(ctx) {
+function facetasV1(ctx, contrast = CONTRAST_PADRAO) {
   ctx.save();
   ctx.translate(-13, 0);
   ctx.scale(0.72, 0.72);
@@ -208,7 +212,7 @@ function alinhadorV1(ctx) {
 }
 
 // --- Harmonização Facial -------------------------------------------------
-function faceProfileV0(ctx) {
+function faceProfileV0(ctx, contrast = CONTRAST_PADRAO) {
   // Perfil do rosto, de lado, com um leve sorriso.
   ctx.beginPath();
   ctx.moveTo(-6, -32);
@@ -224,7 +228,7 @@ function faceProfileV0(ctx) {
   // leve curva de sorriso + brilho, por cima da silhueta preenchida — usa a cor
   // de contraste (senão fica branco sobre branco e some).
   ctx.save();
-  ctx.strokeStyle = CONTRAST;
+  ctx.strokeStyle = contrast;
   ctx.beginPath();
   ctx.moveTo(4, 14);
   ctx.quadraticCurveTo(10, 17, 14, 13);
@@ -233,7 +237,7 @@ function faceProfileV0(ctx) {
   ctx.restore();
 }
 
-function faceProfileV1(ctx) {
+function faceProfileV1(ctx, contrast = CONTRAST_PADRAO) {
   // Rosto de frente (oval simples) com eixo central tracejado, sugerindo simetria,
   // e dois pontos de brilho nas maçãs do rosto.
   ctx.beginPath();
@@ -243,7 +247,7 @@ function faceProfileV1(ctx) {
   // Eixo de simetria, sorriso e brilhos — tudo por cima do rosto preenchido, em
   // cor de contraste (senão fica branco sobre branco e some).
   ctx.save();
-  ctx.strokeStyle = CONTRAST;
+  ctx.strokeStyle = contrast;
   ctx.setLineDash([3, 4]);
   ctx.beginPath();
   ctx.moveTo(0, -24);
@@ -292,8 +296,11 @@ function escolherVariante(chave, seed) {
 
 // Desenha a ilustração da especialidade centralizada em (cx, cy), ocupando
 // aproximadamente `size` pixels de diâmetro. `color`/`lineWidth` seguem o estilo
-// do resto do card (ver server/lib/render.js).
-function drawIllustration(ctx, { especialidade, seed, cx, cy, size, color, lineWidth = 3.2 }) {
+// do resto do card (ver server/lib/render.js). `contrastColor` é a cor de fundo
+// do card do cliente que está sendo renderizado (cliente.corPrimaria) — usada só
+// pelos detalhes desenhados por cima das silhuetas preenchidas (brilho, sorriso);
+// se omitida, cai no padrão de segurança (CONTRAST_PADRAO).
+function drawIllustration(ctx, { especialidade, seed, cx, cy, size, color, lineWidth = 3.2, contrastColor }) {
   const chave = chaveDaEspecialidade(especialidade);
   if (!chave) return false;
   const fn = escolherVariante(chave, seed);
@@ -307,7 +314,7 @@ function drawIllustration(ctx, { especialidade, seed, cx, cy, size, color, lineW
   ctx.lineWidth = lineWidth / (size / 100);
   ctx.lineCap = "round";
   ctx.lineJoin = "round";
-  fn(ctx);
+  fn(ctx, contrastColor || CONTRAST_PADRAO);
   ctx.restore();
   return true;
 }
