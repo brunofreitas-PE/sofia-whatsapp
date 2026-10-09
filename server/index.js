@@ -3,6 +3,7 @@ const express = require("express");
 const webhookRoute = require("./routes/webhook");
 const scheduler = require("./lib/scheduler");
 const { registerPhoneNumber } = require("./lib/whatsapp");
+const { generateImageSpec } = require("./lib/claude");
 const store = require("./lib/store");
 
 const app = express();
@@ -129,6 +130,47 @@ app.get("/debug/estado", (req, res) => {
   } catch (err) {
     console.error("[debug] falha ao ler estado:", err);
     res.status(500).type("text/plain").send("Erro: " + err.message);
+  }
+});
+
+// Rota de resgate: gera e manda as imagens certas a partir de um texto já aprovado
+// de verdade (ex: quando um bug fez a imagem sair de um assunto diferente do que foi
+// aprovado — ver claude/sofia-whatsapp-setup.md, 09/10/2026). Espera um corpo JSON
+// { "texto": "...", "especialidade": "...", "format": "post simples" | "carrossel" }
+// (especialidade e format são opcionais). Manda pro OWNER_WHATSAPP_NUMBER de sempre.
+app.post("/debug/gerar-imagens-aprovado", async (req, res) => {
+  if (req.query.token !== process.env.WHATSAPP_VERIFY_TOKEN) {
+    return res.sendStatus(403);
+  }
+  const { texto, especialidade, format } = req.body || {};
+  if (!texto || typeof texto !== "string") {
+    return res
+      .status(400)
+      .type("text/plain")
+      .send('Erro: passe um corpo JSON com {"texto": "..."} (o texto completo que foi aprovado).');
+  }
+  try {
+    const calendarItem = {
+      especialidade: especialidade || null,
+      format: format || "post simples",
+      title: "gerado manualmente via /debug/gerar-imagens-aprovado",
+    };
+    const spec = await generateImageSpec({ calendarItem, suggestionText: texto });
+    const owner = process.env.OWNER_WHATSAPP_NUMBER;
+    await webhookRoute.gerarEEnviarImagens({
+      to: owner,
+      pendingSuggestion: {
+        slides: spec.slides,
+        format: calendarItem.format,
+        calendarItem,
+        date: new Date().toISOString().slice(0, 10),
+      },
+    });
+    res.type("text/plain").send("Imagens geradas e enviadas! Confira seu WhatsApp.");
+  } catch (err) {
+    console.error("[debug] falha ao gerar imagens manualmente:", err);
+    const detalhe = err.response?.data ? JSON.stringify(err.response.data, null, 2) : err.message;
+    res.status(500).type("text/plain").send("Erro: " + detalhe);
   }
 });
 
