@@ -5,6 +5,31 @@ const scheduler = require("./lib/scheduler");
 const { registerPhoneNumber } = require("./lib/whatsapp");
 const { generateImageSpec } = require("./lib/claude");
 const store = require("./lib/store");
+const { porSlug, todosOsClientes } = require("./lib/clients");
+
+// Helper usado pelas rotas de debug abaixo: resolve QUAL cliente usar. Se vier
+// ?cliente=<slug> na URL, usa esse (e já valida que existe). Se não vier e só
+// existir UM cliente configurado, usa esse (bom pra continuar funcionando com
+// ?token=... só, do jeito que já estava antes do multi-cliente). Se houver mais
+// de um cliente e nenhum slug foi passado, não dá pra adivinhar — pede pra
+// especificar.
+function resolverClienteDaQuery(slugQuery) {
+  if (slugQuery) {
+    return porSlug(slugQuery); // já lança erro claro se o slug não existir
+  }
+  const todos = todosOsClientes();
+  if (todos.length === 1) return todos[0];
+  if (todos.length === 0) {
+    throw new Error(
+      "Nenhum cliente configurado (confira server/clients/*.json e as variáveis OWNER_WHATSAPP_NUMBER__<slug> no Railway)."
+    );
+  }
+  throw new Error(
+    `Mais de um cliente configurado (${todos
+      .map((c) => c.slug)
+      .join(", ")}) — passe ?cliente=<slug> na URL pra dizer qual.`
+  );
+}
 
 const app = express();
 app.use(express.json());
@@ -66,14 +91,18 @@ app.get("/privacidade", (req, res) => {
 // Rota temporária pra testar a sugestão do dia sem esperar o horário do agendador (8h).
 // Protegida por um token simples na URL (reaproveita o WHATSAPP_VERIFY_TOKEN) — não é
 // segurança de verdade, só evita que alguém aleatório dispare isso. Dá pra remover
-// depois que não precisar mais testar manualmente.
+// depois que não precisar mais testar manualmente. Passe ?cliente=<slug> pra testar
+// um cliente específico (necessário assim que houver mais de um cadastrado).
 app.get("/debug/gerar-sugestao", async (req, res) => {
   if (req.query.token !== process.env.WHATSAPP_VERIFY_TOKEN) {
     return res.sendStatus(403);
   }
   try {
-    const suggestion = await scheduler.runDailySuggestionNow();
-    res.type("text/plain").send("Sugestão gerada e enviada! Confira seu WhatsApp.\n\n" + suggestion);
+    const cliente = resolverClienteDaQuery(req.query.cliente);
+    const suggestion = await scheduler.runDailySuggestionNow(cliente);
+    res
+      .type("text/plain")
+      .send(`Sugestão gerada e enviada pro cliente "${cliente.slug}"! Confira o WhatsApp.\n\n` + suggestion);
   } catch (err) {
     console.error("[debug] falha ao gerar sugestão:", err);
     // err.response?.data traz o detalhe de verdade quando o erro vem de uma API
@@ -117,15 +146,17 @@ app.get("/debug/registrar-numero", async (req, res) => {
 });
 
 // Rota temporária só pra testar se o Railway Volume (DATA_DIR) está persistindo os
-// dados entre deploys — mostra o estado salvo agora (sugestão pendente, histórico).
-// Uso: chamar antes e depois de um redeploy e comparar — se continuar igual depois
-// do redeploy, o volume está funcionando. Pode remover depois de confirmado.
+// dados entre deploys — mostra o estado salvo agora (sugestão pendente, histórico) de
+// UM cliente (?cliente=<slug>, ver resolverClienteDaQuery acima). Uso: chamar antes e
+// depois de um redeploy e comparar — se continuar igual depois do redeploy, o volume
+// está funcionando. Pode remover depois de confirmado.
 app.get("/debug/estado", (req, res) => {
   if (req.query.token !== process.env.WHATSAPP_VERIFY_TOKEN) {
     return res.sendStatus(403);
   }
   try {
-    const state = store.load();
+    const cliente = resolverClienteDaQuery(req.query.cliente);
+    const state = store.load(cliente.slug);
     res.type("text/plain").send(JSON.stringify(state, null, 2));
   } catch (err) {
     console.error("[debug] falha ao ler estado:", err);
@@ -137,17 +168,43 @@ app.get("/debug/estado", (req, res) => {
 // de verdade (ex: quando um bug fez a imagem sair de um assunto diferente do que foi
 // aprovado — ver claude/sofia-whatsapp-setup.md, 09/10/2026).
 //
-// GET mostra um formulariozinho (o Bruno não tem como fazer um POST colando uma URL
-// na barra de endereço) — ele cola o texto aprovado numa caixa, escolhe a
-// especialidade/formato e aperta um botão, que dispara o POST de verdade pro mesmo
-// endereço. POST espera um corpo JSON { "texto": "...", "especialidade": "...",
+// GET mostra um formulariozinho (o profissional não tem como fazer um POST colando
+// uma URL na barra de endereço) — ele escolhe o CLIENTE (quando houver mais de um
+// cadastrado), cola o texto aprovado numa caixa, escolhe a especialidade/formato e
+// aperta um botão, que dispara o POST de verdade pro mesmo endereço. A lista de
+// especialidades do dropdown muda sozinha de acordo com o cliente escolhido (cada
+// cliente tem sua própria lista — ver server/clients/<slug>.json). POST espera um
+// corpo JSON { "cliente": "<slug>", "texto": "...", "especialidade": "...",
 // "format": "post simples" | "carrossel" } (especialidade e format são opcionais) e
-// manda pro OWNER_WHATSAPP_NUMBER de sempre.
+// manda pro ownerWhatsappNumber desse cliente.
 app.get("/debug/gerar-imagens-aprovado", (req, res) => {
   if (req.query.token !== process.env.WHATSAPP_VERIFY_TOKEN) {
     return res.sendStatus(403);
   }
+  let clientes;
+  try {
+    clientes = todosOsClientes();
+  } catch (err) {
+    return res.status(500).type("text/plain").send("Erro: " + err.message);
+  }
+  if (clientes.length === 0) {
+    return res
+      .status(500)
+      .type("text/plain")
+      .send(
+        "Nenhum cliente configurado (confira server/clients/*.json e as variáveis OWNER_WHATSAPP_NUMBER__<slug> no Railway)."
+      );
+  }
+
   const actionUrl = `/debug/gerar-imagens-aprovado?token=${encodeURIComponent(req.query.token)}`;
+  const especialidadesPorCliente = {};
+  clientes.forEach((c) => {
+    especialidadesPorCliente[c.slug] = c.especialidades || [];
+  });
+  const clienteOptions = clientes
+    .map((c) => `<option value="${c.slug}">${c.nomeClinica} (${c.nomeProfissional})</option>`)
+    .join("\n      ");
+
   res.type("html").send(`<!doctype html>
 <html lang="pt-BR">
 <head>
@@ -166,19 +223,22 @@ app.get("/debug/gerar-imagens-aprovado", (req, res) => {
 </head>
 <body>
   <h2>Gerar as imagens certas de um texto já aprovado</h2>
-  <p>Cola abaixo o texto COMPLETO que você aprovou de verdade (legenda + a parte "IMAGEM(NS)" + hashtags, tudo junto). Depois escolhe a especialidade e o formato, e aperta o botão.</p>
+  <p>Escolhe o cliente, cola abaixo o texto COMPLETO que foi aprovado de verdade (legenda + a parte "IMAGEM(NS)" + hashtags, tudo junto), escolhe a especialidade e o formato, e aperta o botão.</p>
   <form id="f">
+    ${
+      clientes.length > 1
+        ? `<label for="cliente">Cliente</label>
+    <select id="cliente" name="cliente">
+      ${clienteOptions}
+    </select>`
+        : `<input type="hidden" id="cliente" name="cliente" value="${clientes[0].slug}">`
+    }
+
     <label for="texto">Texto aprovado</label>
     <textarea id="texto" name="texto" required placeholder="Cole aqui o texto inteiro..."></textarea>
 
     <label for="especialidade">Especialidade</label>
-    <select id="especialidade" name="especialidade">
-      <option value="Implantes dentários (dente fixo)">Implantes dentários (dente fixo)</option>
-      <option value="Prótese / Protocolo">Prótese / Protocolo</option>
-      <option value="Facetas em resina 3D">Facetas em resina 3D</option>
-      <option value="Alinhadores">Alinhadores</option>
-      <option value="Harmonização Facial">Harmonização Facial</option>
-    </select>
+    <select id="especialidade" name="especialidade"></select>
 
     <label for="format">Formato</label>
     <select id="format" name="format">
@@ -190,6 +250,19 @@ app.get("/debug/gerar-imagens-aprovado", (req, res) => {
   </form>
   <div id="status"></div>
   <script>
+    const ESPECIALIDADES_POR_CLIENTE = ${JSON.stringify(especialidadesPorCliente)};
+    const clienteEl = document.getElementById("cliente");
+    const especialidadeEl = document.getElementById("especialidade");
+
+    function atualizarEspecialidades() {
+      const lista = ESPECIALIDADES_POR_CLIENTE[clienteEl.value] || [];
+      especialidadeEl.innerHTML = lista.map((e) => \`<option value="\${e}">\${e}</option>\`).join("");
+    }
+    if (clienteEl.tagName === "SELECT") {
+      clienteEl.addEventListener("change", atualizarEspecialidades);
+    }
+    atualizarEspecialidades();
+
     document.getElementById("f").addEventListener("submit", async (ev) => {
       ev.preventDefault();
       const btn = document.getElementById("btn");
@@ -201,8 +274,9 @@ app.get("/debug/gerar-imagens-aprovado", (req, res) => {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
+            cliente: clienteEl.value,
             texto: document.getElementById("texto").value,
-            especialidade: document.getElementById("especialidade").value,
+            especialidade: especialidadeEl.value,
             format: document.getElementById("format").value,
           }),
         });
@@ -223,7 +297,7 @@ app.post("/debug/gerar-imagens-aprovado", async (req, res) => {
   if (req.query.token !== process.env.WHATSAPP_VERIFY_TOKEN) {
     return res.sendStatus(403);
   }
-  const { texto, especialidade, format } = req.body || {};
+  const { texto, especialidade, format, cliente: clienteSlug } = req.body || {};
   if (!texto || typeof texto !== "string") {
     return res
       .status(400)
@@ -231,15 +305,16 @@ app.post("/debug/gerar-imagens-aprovado", async (req, res) => {
       .send('Erro: passe um corpo JSON com {"texto": "..."} (o texto completo que foi aprovado).');
   }
   try {
+    const cliente = resolverClienteDaQuery(clienteSlug);
     const calendarItem = {
       especialidade: especialidade || null,
       format: format || "post simples",
       title: "gerado manualmente via /debug/gerar-imagens-aprovado",
     };
-    const spec = await generateImageSpec({ calendarItem, suggestionText: texto });
-    const owner = process.env.OWNER_WHATSAPP_NUMBER;
+    const spec = await generateImageSpec({ cliente, calendarItem, suggestionText: texto });
     await webhookRoute.gerarEEnviarImagens({
-      to: owner,
+      to: cliente.ownerWhatsappNumber,
+      cliente,
       pendingSuggestion: {
         slides: spec.slides,
         format: calendarItem.format,
@@ -247,7 +322,7 @@ app.post("/debug/gerar-imagens-aprovado", async (req, res) => {
         date: new Date().toISOString().slice(0, 10),
       },
     });
-    res.type("text/plain").send("Imagens geradas e enviadas! Confira seu WhatsApp.");
+    res.type("text/plain").send(`Imagens geradas e enviadas pro cliente "${cliente.slug}"! Confira o WhatsApp.`);
   } catch (err) {
     console.error("[debug] falha ao gerar imagens manualmente:", err);
     const detalhe = err.response?.data ? JSON.stringify(err.response.data, null, 2) : err.message;
