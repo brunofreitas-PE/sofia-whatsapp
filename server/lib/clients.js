@@ -60,6 +60,17 @@ function carregarTodos() {
   if (arquivos.length === 0) {
     throw new Error(`Nenhum arquivo .json de cliente encontrado em ${CLIENTS_DIR}.`);
   }
+  // DEBUG TEMPORÁRIO (10/10/2026) — remover depois de resolver o mistério da variável
+  // sumida. Mostra, direto do processo real que está rodando (não de um `Console`
+  // separado), toda variável de ambiente cujo nome contém "OWNER" — pra comparar com
+  // o que a gente já viu no Railway Variables/Console.
+  const todasEnvComOwner = Object.keys(process.env).filter((k) => k.includes("OWNER"));
+  console.log(
+    `[clients][debug] variáveis de ambiente com "OWNER" vistas por ESTE processo: ${
+      todasEnvComOwner.length ? todasEnvComOwner.map((k) => `${k}=${process.env[k]}`).join(" | ") : "(nenhuma)"
+    }`
+  );
+  console.log(`[clients][debug] arquivos encontrados em ${CLIENTS_DIR}: ${JSON.stringify(arquivos)}`);
   cache = arquivos.map((file) => {
     const slug = file.replace(/\.json$/, "");
     const raw = JSON.parse(fs.readFileSync(path.join(CLIENTS_DIR, file), "utf8"));
