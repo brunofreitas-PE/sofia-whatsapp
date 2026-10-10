@@ -60,24 +60,28 @@ function carregarTodos() {
   if (arquivos.length === 0) {
     throw new Error(`Nenhum arquivo .json de cliente encontrado em ${CLIENTS_DIR}.`);
   }
-  // DEBUG TEMPORÁRIO (10/10/2026) — remover depois de resolver o mistério da variável
-  // sumida. Mostra, direto do processo real que está rodando (não de um `Console`
-  // separado), toda variável de ambiente cujo nome contém "OWNER" — pra comparar com
-  // o que a gente já viu no Railway Variables/Console.
+  // DEBUG TEMPORÁRIO (10/10/2026) — mantido só até você confirmar que a correção
+  // abaixo funcionou (deve mostrar a variável OWNER_WHATSAPP_NUMBER__atelier_do_sorriso
+  // na lista desta vez). Pode pedir pra eu remover depois.
   const todasEnvComOwner = Object.keys(process.env).filter((k) => k.includes("OWNER"));
   console.log(
     `[clients][debug] variáveis de ambiente com "OWNER" vistas por ESTE processo: ${
       todasEnvComOwner.length ? todasEnvComOwner.map((k) => `${k}=${process.env[k]}`).join(" | ") : "(nenhuma)"
     }`
   );
-  console.log(`[clients][debug] arquivos encontrados em ${CLIENTS_DIR}: ${JSON.stringify(arquivos)}`);
   cache = arquivos.map((file) => {
     const slug = file.replace(/\.json$/, "");
+    // IMPORTANTE: nome de variável de ambiente só pode ter letras, números e "_" — não
+    // pode ter hífen. Como o slug vem do nome do arquivo (ex: "atelier-do-sorriso",
+    // com hífen), aqui a gente troca "-" por "_" SÓ pra montar o nome da variável que
+    // vai procurar no Railway. O slug em si (usado em URLs, logs, etc.) continua com
+    // hífen normalmente — só o nome da variável de ambiente é diferente.
+    const envKey = `OWNER_WHATSAPP_NUMBER__${slug.replace(/-/g, "_")}`;
     const raw = JSON.parse(fs.readFileSync(path.join(CLIENTS_DIR, file), "utf8"));
-    const ownerWhatsappNumber = process.env[`OWNER_WHATSAPP_NUMBER__${slug}`] || null;
+    const ownerWhatsappNumber = process.env[envKey] || null;
     if (!ownerWhatsappNumber) {
       console.warn(
-        `[clients] falta a variável OWNER_WHATSAPP_NUMBER__${slug} no Railway — esse cliente (${slug}) não vai receber nada até isso ser configurado.`
+        `[clients] falta a variável ${envKey} no Railway — esse cliente (${slug}) não vai receber nada até isso ser configurado.`
       );
     }
     return { ...raw, slug, ownerWhatsappNumber };
